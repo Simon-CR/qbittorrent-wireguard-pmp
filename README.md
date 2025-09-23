@@ -29,8 +29,12 @@ A bash script that automatically monitors your WireGuard listening port and upda
 git clone https://github.com/Simon-CR/qbittorrent-wireguard-pmp.git
 cd qbittorrent-wireguard-pmp
 
-# Run the installation script
+# Make installation script executable and run it
+chmod +x install.sh
 ./install.sh
+
+# Alternative: run without making executable
+# sh install.sh
 ```
 
 The installation script will:
