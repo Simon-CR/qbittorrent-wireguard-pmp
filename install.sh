@@ -328,7 +328,7 @@ run_deployment_setup() {
         crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
         
         # Add new cron job
-        echo "*/5 * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
+    echo "* * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
         
         # Install new crontab
         if crontab "$temp_cron"; then
@@ -407,7 +407,7 @@ run_deployment_setup() {
                         echo "Setting up cron job as fallback..."
                         temp_cron=$(mktemp)
                         crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
-                        echo "*/5 * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
+                        echo "* * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
                         if crontab "$temp_cron"; then
                             echo "✓ Cron job added successfully as fallback"
                         fi
@@ -425,7 +425,7 @@ run_deployment_setup() {
                 echo "Setting up cron job as fallback..."
                 temp_cron=$(mktemp)
                 crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
-                echo "*/5 * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
+                echo "* * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
                 if crontab "$temp_cron"; then
                     echo "✓ Cron job added successfully as fallback"
                 fi
@@ -587,16 +587,31 @@ if wg show "$WG_INTERFACE" >/dev/null 2>&1; then
 else
     echo -e "${YELLOW}⚠ WireGuard interface '$WG_INTERFACE' not found or not active${NC}"
     echo "  Available interfaces:"
-    wg show interfaces 2>/dev/null || echo "  None found"
+    available_ifaces_raw=$(wg show interfaces 2>/dev/null || true)
+    if [[ -n "$available_ifaces_raw" ]]; then
+        echo "$available_ifaces_raw"
+    else
+        echo "  None found"
+    fi
     echo
-    read -p "Enter your WireGuard interface name (or press Enter to continue with '$WG_INTERFACE'): " user_interface
+    DEFAULT_IFACE="$WG_INTERFACE"
+    if [[ -n "$available_ifaces_raw" ]]; then
+        available_ifaces=$(echo "$available_ifaces_raw" | tr ' ' '\n' | awk 'NF')
+        iface_count=$(echo "$available_ifaces" | wc -l | tr -d '[:space:]')
+        if [[ "$iface_count" == "1" ]]; then
+            DEFAULT_IFACE=$(echo "$available_ifaces" | head -1)
+        fi
+    fi
+    read -p "Enter your WireGuard interface name (or press Enter to continue with '$DEFAULT_IFACE'): " user_interface
     if [[ -n "$user_interface" ]]; then
         WG_INTERFACE="$user_interface"
-        echo -e "${BLUE}Will use interface: $WG_INTERFACE${NC}"
-        # Update the script with the correct interface
-        sed -i.bak "s/WG_INTERFACE=\"wg0\"/WG_INTERFACE=\"$WG_INTERFACE\"/" "$MAIN_SCRIPT"
-        echo -e "${GREEN}✓ Updated script with interface: $WG_INTERFACE${NC}"
+    else
+        WG_INTERFACE="$DEFAULT_IFACE"
     fi
+    echo -e "${BLUE}Will use interface: $WG_INTERFACE${NC}"
+    # Update the script with the correct interface
+    sed -i.bak "s/WG_INTERFACE=\"wg0\"/WG_INTERFACE=\"$WG_INTERFACE\"/" "$MAIN_SCRIPT"
+    echo -e "${GREEN}✓ Updated script with interface: $WG_INTERFACE${NC}"
 fi
 
 # Function to check if qBittorrent is running
@@ -807,7 +822,7 @@ case $automation_choice in
         echo "Skipping automation setup."
         echo
         echo -e "${YELLOW}Manual setup options:${NC}"
-        echo "  Cron: crontab -e, then add: */5 * * * * $MAIN_SCRIPT"
+    echo "  Cron: crontab -e, then add: * * * * * $MAIN_SCRIPT"
         echo "  Service: bash $SCRIPT_DIR/service-manager.sh install"
         echo "  Manage later: bash $0 --manage"
         ;;

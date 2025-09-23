@@ -50,10 +50,32 @@ log_warning() {
     echo -e "${YELLOW}${message}${NC}" | tee -a "$LOG_FILE"
 }
 
-# Get WireGuard listening port
+
+# Get external port from natpmpc (ProtonVPN)
+get_protonvpn_port() {
+    if ! command -v natpmpc >/dev/null 2>&1; then
+        log_warning "natpmpc not found, attempting to install..."
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y natpmpc
+        elif command -v brew >/dev/null 2>&1; then
+            brew install natpmpc
+        else
+            log_error "Could not auto-install natpmpc. Please install it manually."
+            return 1
+        fi
+    fi
+    local port_line port
+    port_line=$(natpmpc -g | grep -E "Public Port" | grep -Eo '[0-9]+' | head -1)
+    if [[ -n "$port_line" && "$port_line" =~ ^[0-9]+$ ]]; then
+        echo "$port_line"
+        return 0
+    fi
+    return 1
+}
+
+# Get WireGuard listening port (legacy/fallback)
 get_wireguard_port() {
     local port
-    
     # Method 1: Try to get from wg command
     if command -v wg >/dev/null 2>&1; then
         port=$(wg show "$WG_INTERFACE" listen-port 2>/dev/null || echo "")
@@ -62,7 +84,6 @@ get_wireguard_port() {
             return 0
         fi
     fi
-    
     # Method 2: Try to parse from wg-quick config (fallback)
     if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
         port=$(grep -E "^ListenPort\s*=" "/etc/wireguard/${WG_INTERFACE}.conf" 2>/dev/null | cut -d'=' -f2 | tr -d ' ' || echo "")
@@ -71,7 +92,6 @@ get_wireguard_port() {
             return 0
         fi
     fi
-    
     # Method 3: Try netstat/ss to find WireGuard process (last resort)
     if command -v ss >/dev/null 2>&1; then
         port=$(ss -ulnp | grep -E ":([0-9]+).*wireguard" | head -1 | sed -E 's/.*:([0-9]+).*/\1/' || echo "")
@@ -80,7 +100,6 @@ get_wireguard_port() {
             return 0
         fi
     fi
-    
     return 1
 }
 
@@ -157,49 +176,54 @@ main() {
         exit 1
     fi
     
-    # Get current WireGuard port
-    local current_wg_port
-    if ! current_wg_port=$(get_wireguard_port); then
-        log_error "Could not determine WireGuard listening port"
-        log_error "Please ensure WireGuard interface '${WG_INTERFACE}' is active"
-        exit 1
+
+    # Try ProtonVPN port detection first
+    local sync_port
+    if sync_port=$(get_protonvpn_port); then
+        log "Detected ProtonVPN NAT-PMP port: ${BLUE}$sync_port${NC}"
+    else
+        log_warning "ProtonVPN port not detected, falling back to WireGuard listen-port"
+        if ! sync_port=$(get_wireguard_port); then
+            log_error "Could not determine WireGuard listening port"
+            log_error "Please ensure WireGuard interface '${WG_INTERFACE}' is active"
+            exit 1
+        fi
+        log "Current WireGuard port: ${BLUE}$sync_port${NC}"
     fi
-    
-    log "Current WireGuard port: ${BLUE}$current_wg_port${NC}"
-    
+
     # Get current qBittorrent port
     local current_qbt_port
     current_qbt_port=$(get_qbittorrent_port)
-    
+
     if [[ -z "$current_qbt_port" ]]; then
         log_error "Could not determine current qBittorrent port"
         exit 1
     fi
-    
+
     log "Current qBittorrent port: ${BLUE}$current_qbt_port${NC}"
-    
+
     # Compare ports and update if different
-    if [[ "$current_qbt_port" != "$current_wg_port" ]]; then
-        log_warning "Port mismatch detected - updating qBittorrent from ${RED}$current_qbt_port${NC} to ${GREEN}$current_wg_port${NC}"
-        
+    if [[ "$current_qbt_port" != "$sync_port" ]]; then
+        log_warning "Port mismatch detected - updating qBittorrent from ${RED}$current_qbt_port${NC} to ${GREEN}$sync_port${NC}"
+
         # Update qBittorrent port
-        if set_qbittorrent_port "$current_wg_port"; then
-            log_success "Updated qBittorrent port to: $current_wg_port"
-            
+        if set_qbittorrent_port "$sync_port"; then
+            log_success "Updated qBittorrent port to: $sync_port"
+
             # Verify the change
             local verified_port
             verified_port=$(get_qbittorrent_port)
-            if [[ "$verified_port" == "$current_wg_port" ]]; then
+            if [[ "$verified_port" == "$sync_port" ]]; then
                 log_success "Port update verified: qBittorrent is now using port $verified_port"
             else
                 log_warning "Port verification failed. qBittorrent reports port: $verified_port"
             fi
         else
-            log_error "Failed to update qBittorrent port to: $current_wg_port"
+            log_error "Failed to update qBittorrent port to: $sync_port"
             exit 1
         fi
     else
-        log_success "Ports match (${GREEN}$current_wg_port${NC}), no action needed"
+        log_success "Ports match (${GREEN}$sync_port${NC}), no action needed"
     fi
     
     log_success "Port sync check completed successfully"
@@ -213,64 +237,75 @@ daemon_mode() {
     
     # Initial sync
     main
-    
-    local last_wg_port=""
+
+    local last_port=""
     local check_interval=30  # Check every 30 seconds (more responsive than cron)
     local config_check_interval=300  # Check config file changes every 5 minutes
     local last_config_check=0
-    
+
     while true; do
         current_time=$(date +%s)
-        
-        # Get current WireGuard port
-        current_wg_port=$(get_wireguard_port 2>/dev/null || echo "")
-        
-        if [[ -n "$current_wg_port" ]]; then
-            # Check if WireGuard port changed
-            if [[ "$current_wg_port" != "$last_wg_port" ]]; then
-                if [[ -n "$last_wg_port" ]]; then
-                    log_warning "WireGuard port changed from $last_wg_port to $current_wg_port"
-                fi
-                
-                # Sync ports
-                current_qbt_port=$(get_qbittorrent_port 2>/dev/null || echo "")
-                if [[ -n "$current_qbt_port" && "$current_qbt_port" != "$current_wg_port" ]]; then
-                    log_warning "Port mismatch detected - updating qBittorrent from $current_qbt_port to $current_wg_port"
-                    
-                    if set_qbittorrent_port "$current_wg_port"; then
-                        log_success "Updated qBittorrent port to: $current_wg_port"
-                        
-                        # Verify the change
-                        verified_port=$(get_qbittorrent_port)
-                        if [[ "$verified_port" == "$current_wg_port" ]]; then
-                            log_success "Port sync verified: Both services using port $verified_port"
-                        else
-                            log_warning "Port verification failed. qBittorrent reports: $verified_port"
-                        fi
-                    else
-                        log_error "Failed to update qBittorrent port to: $current_wg_port"
-                    fi
-                else
-                    log "Ports already match ($current_wg_port), no action needed"
-                fi
-                
-                last_wg_port="$current_wg_port"
-            fi
+
+        # Try ProtonVPN port detection first
+        current_port=""
+        if current_port=$(get_protonvpn_port 2>/dev/null); then
+            log "[Loop] Detected ProtonVPN NAT-PMP port: ${BLUE}$current_port${NC}"
         else
-            if [[ -n "$last_wg_port" ]]; then
-                log_warning "WireGuard interface $WG_INTERFACE appears to be down"
-                last_wg_port=""
+            log_warning "[Loop] ProtonVPN port not detected, falling back to WireGuard listen-port"
+            current_port=$(get_wireguard_port 2>/dev/null || echo "")
+            if [[ -n "$current_port" ]]; then
+                log "[Loop] Current WireGuard port: ${BLUE}$current_port${NC}"
+            else
+                log_error "[Loop] Could not determine WireGuard listening port"
             fi
         fi
-        
+
+        if [[ -n "$current_port" ]]; then
+            # Check if port changed
+            if [[ "$current_port" != "$last_port" ]]; then
+                if [[ -n "$last_port" ]]; then
+                    log_warning "[Loop] Port changed from $last_port to $current_port"
+                fi
+
+                # Sync ports
+                current_qbt_port=$(get_qbittorrent_port 2>/dev/null || echo "")
+                if [[ -n "$current_qbt_port" && "$current_qbt_port" != "$current_port" ]]; then
+                    log_warning "[Loop] Port mismatch detected - updating qBittorrent from $current_qbt_port to $current_port"
+
+                    if set_qbittorrent_port "$current_port"; then
+                        log_success "[Loop] Updated qBittorrent port to: $current_port"
+
+                        # Verify the change
+                        verified_port=$(get_qbittorrent_port)
+                        if [[ "$verified_port" == "$current_port" ]]; then
+                            log_success "[Loop] Port sync verified: Both services using port $verified_port"
+                        else
+                            log_warning "[Loop] Port verification failed. qBittorrent reports: $verified_port"
+                        fi
+                    else
+                        log_error "[Loop] Failed to update qBittorrent port to: $current_port"
+                    fi
+                else
+                    log "[Loop] Ports already match ($current_port), no action needed"
+                fi
+
+                last_port="$current_port"
+            fi
+        else
+            if [[ -n "$last_port" ]]; then
+                log_warning "[Loop] VPN/WireGuard port appears to be down"
+                last_port=""
+            fi
+        fi
+
         # Periodic health check (every 5 minutes)
         if (( current_time - last_config_check > config_check_interval )); then
             if ! check_qbittorrent; then
-                log_warning "qBittorrent Web UI is not accessible - will retry on next cycle"
+                log_warning "[Loop] qBittorrent Web UI is not accessible - will retry on next cycle"
             fi
             last_config_check=$current_time
         fi
-        
+
         # Sleep for the check interval
         sleep $check_interval
     done

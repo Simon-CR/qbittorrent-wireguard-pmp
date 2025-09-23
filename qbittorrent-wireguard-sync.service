@@ -27,5 +27,10 @@ ReadWritePaths=%h/qbittorrent-wireguard-pmp
 Environment=WG_INTERFACE=wg0
 Environment=QB_PORT=8080
 
+# Notes:
+# - The script runs in daemon mode, checking for port changes every 30 seconds.
+# - All detection, connection, and update events are logged to port-sync.log and systemd journal.
+# - For troubleshooting, check journalctl -u qbittorrent-wireguard-sync and port-sync.log.
+
 [Install]
 WantedBy=multi-user.target

@@ -1,3 +1,13 @@
+## Important: Why the 1-Minute Interval?
+
+ProtonVPN's port forwarding requires a persistent loop to keep the port open. If the loop process stops, the port will close after 60 seconds. This is why the cron job and service are designed to run the sync script every minute (cron) or every 30 seconds (service).
+
+> "Port forwarding is now activated. Note that closing your terminal window will terminate the loop process. You will need to re-run this loop script each time you want to start a new port forwarding session or the port will only stay open for 60 seconds." — ProtonVPN Docs
+
+**Summary:**
+- The frequent interval is required to keep the port forwarding session alive, not just to minimize qBittorrent downtime.
+- The script is lightweight and safe to run frequently.
+
 # qBittorrent WireGuard Port Sync
 
 A bash script that automatically monitors your WireGuard listening port and updates qBittorrent's port mapping when it changes. Perfect for VPN setups with dynamic NAT port forwarding.
@@ -69,16 +79,23 @@ chmod +x port-sync.sh
 
 After installation, you have several options for running the script:
 
+
 ### Option A: Cron Job (Recommended for most users)
-- Runs automatically every 5 minutes
+- Runs automatically every **minute** (recommended)
 - Simple, reliable, low resource usage
 - Set up during installation or manually:
 
 ```bash
 crontab -e
-# Add this line:
-*/5 * * * * /path/to/port-sync.sh >/dev/null 2>&1
+# Add this line for best results:
+* * * * * /path/to/port-sync.sh >/dev/null 2>&1
 ```
+
+**Why 1-minute interval?**
+
+- ProtonVPN's port forwarding session will only stay open for 60 seconds unless the loop process is kept running. Quoting ProtonVPN docs: "Port forwarding is now activated. Note that closing your terminal window will terminate the loop process. You will need to re-run this loop script each time you want to start a new port forwarding session or the port will only stay open for 60 seconds."
+- Running the sync every minute ensures the port forwarding session remains active and your port stays open.
+- The script is lightweight and only updates qBittorrent if a change is detected, so frequent execution is safe and efficient.
 
 ### Option B: Systemd Service (Advanced users)
 - Continuous monitoring with 30-second intervals
