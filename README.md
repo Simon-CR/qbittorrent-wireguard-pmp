@@ -15,6 +15,7 @@ A bash script that automatically monitors your WireGuard listening port and upda
 ## Requirements
 
 - Debian/Ubuntu Linux (or similar)
+- **Bash shell** (not sh - scripts use bash-specific features)
 - WireGuard installed and configured
 - qBittorrent with Web UI enabled (no authentication)
 - `curl` command available
@@ -29,12 +30,12 @@ A bash script that automatically monitors your WireGuard listening port and upda
 git clone https://github.com/Simon-CR/qbittorrent-wireguard-pmp.git
 cd qbittorrent-wireguard-pmp
 
-# Make installation script executable and run it
+# Run the installation script (requires bash, not sh)
 chmod +x install.sh
 ./install.sh
 
-# Alternative: run without making executable
-# sh install.sh
+# Alternative if chmod doesn't work:
+bash install.sh
 ```
 
 The installation script will:
@@ -51,7 +52,7 @@ The installation script will:
 git clone https://github.com/Simon-CR/qbittorrent-wireguard-pmp.git
 cd qbittorrent-wireguard-pmp
 
-# Make script executable
+# Make script executable (requires bash, not sh)
 chmod +x port-sync.sh
 
 # Test the script
@@ -127,6 +128,9 @@ Or with logging to see cron output:
 # Force update qBittorrent to match WireGuard
 ./port-sync.sh --force
 
+# Show detailed debugging information
+./port-sync.sh --debug
+
 # Show help
 ./port-sync.sh --help
 ```
@@ -189,6 +193,17 @@ LOG_FILE="${SCRIPT_DIR}/port-sync.log"
 
 ### Common Issues
 
+**"Error: This script requires bash, not sh":**
+```bash
+# ✗ Wrong - don't use sh
+sh install.sh
+
+# ✓ Correct - use one of these instead:
+bash install.sh
+# or
+chmod +x install.sh && ./install.sh
+```
+
 **qBittorrent not accessible:**
 ```bash
 ERROR: qBittorrent Web UI is not accessible at http://localhost:8080
@@ -230,13 +245,16 @@ cat port-sync.log
 Test individual components:
 ```bash
 # Test WireGuard port detection
-sudo wg show wg0 listen-port
+wg show wg0 listen-port
 
 # Test qBittorrent API access
 curl http://localhost:8080/api/v2/app/version
 
 # Test port retrieval
 curl http://localhost:8080/api/v2/app/preferences | grep listen_port
+
+# Test the script with debug mode
+bash port-sync.sh --debug
 ```
 
 ## File Structure
