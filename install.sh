@@ -387,7 +387,10 @@ run_deployment_setup() {
             echo -e "${CYAN}Running service installer...${NC}"
             echo "Note: This will require root privileges for systemd operations"
             
-            if bash "$SCRIPT_DIR/service-manager.sh" install; then
+            # Extract current values from main script for non-interactive install
+            SM_WG=$(grep 'WG_INTERFACE=' "$MAIN_SCRIPT" | head -1 | cut -d'"' -f2 || echo "wg0")
+            SM_QP=$(grep 'QBITTORRENT_PORT=' "$MAIN_SCRIPT" | head -1 | cut -d'"' -f2 || echo "8080")
+            if bash "$SCRIPT_DIR/service-manager.sh" --install -y --wg-interface "$SM_WG" --qb-port "$SM_QP" --start; then
                 echo "✓ Systemd service set up successfully"
                 echo "  Use 'bash $SCRIPT_DIR/service-manager.sh status' to check status"
                 echo "  Use 'bash $SCRIPT_DIR/service-manager.sh logs' to view logs"
