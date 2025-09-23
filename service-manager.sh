@@ -101,18 +101,24 @@ do_install() {
     if grep -q 'QBITTORRENT_PORT=' "$SCRIPT_DIR/port-sync.sh"; then
         QB_DET=$(grep 'QBITTORRENT_PORT=' "$SCRIPT_DIR/port-sync.sh" | head -1 | cut -d'"' -f2)
     fi
-    # Try to derive gateway from wg interface IP
-    if command -v ip >/dev/null 2>&1; then
-        IFIP=$(ip -4 addr show dev "$WG_DET" 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d'/' -f1)
-        if [[ "$IFIP" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
-            GW_DET="${BASH_REMATCH[1]}.1"
-        fi
-    fi
+    # Derive NAT-PMP gateway after we know the interface
 
     # Apply CLI/env overrides
     WG_VAL="${WG_ARG:-$WG_DET}"
     QB_VAL="${QB_ARG:-$QB_DET}"
-    GW_VAL="${GW_ARG:-$GW_DET}"
+    # If GW not provided, derive from selected interface
+    if [[ -z "${GW_ARG}" ]]; then
+        if command -v ip >/dev/null 2>&1; then
+            IFIP=$(ip -4 addr show dev "$WG_VAL" 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d'/' -f1)
+            if [[ "$IFIP" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+                GW_VAL="${BASH_REMATCH[1]}.1"
+            else
+                GW_VAL=""
+            fi
+        fi
+    else
+        GW_VAL="$GW_ARG"
+    fi
 
     if [[ $NONINTERACTIVE -eq 0 ]]; then
         echo "Detected configuration:"

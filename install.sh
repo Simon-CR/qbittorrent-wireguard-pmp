@@ -40,6 +40,59 @@ show_help() {
     echo "Default behavior (no options): Run the full installation/setup wizard"
 }
 
+# Refresh installed systemd service unit to the latest template while preserving env
+refresh_service_unit() {
+    local svc_name="qbittorrent-wireguard-sync"
+    local svc_path="/etc/systemd/system/${svc_name}.service"
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! systemctl is-enabled "$svc_name" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ ! -f "$svc_path" ]]; then
+        return 0
+    fi
+
+    echo -e "${BLUE}Refreshing installed systemd service unit${NC}"
+    echo "Detected installed unit: $svc_path"
+
+    # Parse current env values from the installed unit
+    local cur_wg cur_qp cur_gw
+    cur_wg=$(grep -E '^Environment=WG_INTERFACE=' "$svc_path" 2>/dev/null | head -1 | awk -F '=' '{print $3}')
+    cur_qp=$(grep -E '^Environment=QB_PORT=' "$svc_path" 2>/dev/null | head -1 | awk -F '=' '{print $3}')
+    cur_gw=$(grep -E '^Environment=NATPMP_GATEWAY=' "$svc_path" 2>/dev/null | head -1 | awk -F '=' '{print $3}')
+
+    [[ -z "$cur_wg" ]] && cur_wg="wg0"
+    [[ -z "$cur_qp" ]] && cur_qp="8080"
+
+    echo "Current settings: WG_INTERFACE=${cur_wg}, QB_PORT=${cur_qp}, NATPMP_GATEWAY=${cur_gw:-<unset>}"
+
+    if ask_confirm "Refresh service unit to latest template (preserve these values)?" Y; then
+        local _out
+        _out=$(mktemp)
+        if sudo bash "$SCRIPT_DIR/service-manager.sh" --install -y \
+            --wg-interface "$cur_wg" --qb-port "$cur_qp" \
+            ${cur_gw:+--natpmp-gateway "$cur_gw"} --no-start >"$_out" 2>&1; then
+            echo -e "${GREEN}✓ Service unit refreshed${NC}"
+            sudo systemctl daemon-reload || true
+            if ask_confirm "Restart ${svc_name} now to apply changes?" Y; then
+                if sudo systemctl restart "$svc_name"; then
+                    echo -e "${GREEN}✓ Service restarted${NC}"
+                else
+                    echo -e "${YELLOW}⚠ Failed to restart service. Check logs with: sudo journalctl -u ${svc_name} -n 50${NC}"
+                fi
+            else
+                echo "You can restart later with: sudo systemctl restart ${svc_name}"
+            fi
+        else
+            echo -e "${YELLOW}⚠ Service refresh encountered issues. Output (last 50 lines):${NC}"
+            tail -n 50 "$_out" || true
+        fi
+        rm -f "$_out"
+    fi
+}
+
 # Prompt helper: confirm with default
 # Usage: ask_confirm "Message" [Default]
 # Default: "Y" or "N" (case-insensitive). Returns 0 for Yes, 1 for No.
@@ -363,13 +416,13 @@ run_deployment_setup() {
         # Get existing crontab (excluding old port-sync entries)
         crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
         
-        # Add new cron job
-    echo "* * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
+    # Add new cron job (every minute) with env for selected interface and port
+    echo "* * * * * WG_INTERFACE=$WG_INTERFACE QB_PORT=$QB_PORT QBITTORRENT_PORT=$QB_PORT $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
         
         # Install new crontab
         if crontab "$temp_cron"; then
             echo "✓ Cron job added successfully"
-            echo "The script will now run every 5 minutes automatically."
+            echo "The script will now run every 1 minute automatically."
         else
             echo "✗ Failed to install cron job"
         fi
@@ -423,16 +476,42 @@ run_deployment_setup() {
             echo -e "${CYAN}Running service installer...${NC}"
             echo "Note: This will require root privileges for systemd operations"
             
-            # Extract current values from main script for non-interactive install
-            SM_WG=$(grep 'WG_INTERFACE=' "$MAIN_SCRIPT" | head -1 | cut -d'"' -f2 || echo "wg0")
-            SM_QP=$(grep 'QBITTORRENT_PORT=' "$MAIN_SCRIPT" | head -1 | cut -d'"' -f2 || echo "8080")
-            if bash "$SCRIPT_DIR/service-manager.sh" --install -y --wg-interface "$SM_WG" --qb-port "$SM_QP" --start; then
+            # Use values selected earlier in this installer session
+            SM_WG="$WG_INTERFACE"
+            SM_QP="$QB_PORT"
+            # Try to derive NAT-PMP gateway from the selected interface IP (x.y.z.1)
+            SM_GW=""
+            if command -v ip >/dev/null 2>&1; then
+                IFIP=$(ip -4 addr show dev "$SM_WG" 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d'/' -f1)
+                if [[ "$IFIP" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+                    SM_GW="${BASH_REMATCH[1]}.1"
+                fi
+            fi
+            # Optional quick validation of NAT-PMP gateway
+            if [[ -n "$SM_GW" ]]; then
+                if natpmpc -g "$SM_GW" -a 1 0 udp 1 >/dev/null 2>&1; then
+                    echo "Detected NAT-PMP gateway: $SM_GW"
+                else
+                    echo -e "${YELLOW}⚠ NAT-PMP gateway validation failed for $SM_GW. Proceeding without explicit gateway.${NC}"
+                    SM_GW=""
+                fi
+            else
+                echo -e "${YELLOW}⚠ Could not derive NAT-PMP gateway from interface $SM_WG. Service installer will attempt auto-detection.${NC}"
+            fi
+
+            # Run service-manager and capture output for better diagnostics
+            _svc_tmp=$(mktemp)
+            if bash "$SCRIPT_DIR/service-manager.sh" --install -y --wg-interface "$SM_WG" --qb-port "$SM_QP" ${SM_GW:+--natpmp-gateway "$SM_GW"} --start >"$_svc_tmp" 2>&1; then
                 echo "✓ Systemd service set up successfully"
                 echo "  Use 'bash $SCRIPT_DIR/service-manager.sh status' to check status"
                 echo "  Use 'bash $SCRIPT_DIR/service-manager.sh logs' to view logs"
                 echo "  Use 'bash $SCRIPT_DIR/service-manager.sh stop' to stop the service"
+                rm -f "$_svc_tmp"
             else
                 echo "✗ Failed to set up systemd service"
+                echo -e "${YELLOW}— Service installer output (last 50 lines) —${NC}"
+                tail -n 50 "$_svc_tmp" || true
+                rm -f "$_svc_tmp"
                 if [[ "$setup_cron" != "true" ]]; then
                     echo "Would you like to fall back to cron job setup instead?"
                     read -p "Set up cron job? (y/N): " fallback_cron
@@ -443,7 +522,7 @@ run_deployment_setup() {
                         echo "Setting up cron job as fallback..."
                         temp_cron=$(mktemp)
                         crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
-                        echo "* * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
+                        echo "* * * * * WG_INTERFACE=$WG_INTERFACE QB_PORT=$QB_PORT QBITTORRENT_PORT=$QB_PORT $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
                         if crontab "$temp_cron"; then
                             echo "✓ Cron job added successfully as fallback"
                         fi
@@ -461,7 +540,7 @@ run_deployment_setup() {
                 echo "Setting up cron job as fallback..."
                 temp_cron=$(mktemp)
                 crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
-                echo "* * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
+                echo "* * * * * WG_INTERFACE=$WG_INTERFACE QB_PORT=$QB_PORT QBITTORRENT_PORT=$QB_PORT $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
                 if crontab "$temp_cron"; then
                     echo "✓ Cron job added successfully as fallback"
                 fi
@@ -540,6 +619,8 @@ if [[ -d .git ]]; then
             fi
         else
             echo -e "${GREEN}✓ Already up to date${NC}"
+            # If a systemd service is installed, offer to refresh unit from latest template
+            refresh_service_unit
         fi
     fi
 fi
@@ -676,9 +757,7 @@ else
         WG_INTERFACE="$DEFAULT_IFACE"
     fi
     echo -e "${BLUE}Will use interface: $WG_INTERFACE${NC}"
-    # Update the script with the correct interface
-    sed -i.bak "s/WG_INTERFACE=\"wg0\"/WG_INTERFACE=\"$WG_INTERFACE\"/" "$MAIN_SCRIPT"
-    echo -e "${GREEN}✓ Updated script with interface: $WG_INTERFACE${NC}"
+    echo -e "${GREEN}✓ Selected interface will be passed via environment${NC}"
 fi
 
 # Function to check if qBittorrent is running
@@ -827,13 +906,7 @@ echo "Using qBittorrent URL: $QB_URL"
 if curl -s -f "${QB_URL}/api/v2/app/version" >/dev/null 2>&1; then
     qb_version=$(curl -s "${QB_URL}/api/v2/app/version" 2>/dev/null || echo "unknown")
     echo -e "${GREEN}✓ qBittorrent Web UI is accessible (version: $qb_version)${NC}"
-    
-    # Update the script with the correct port if it's not 8080
-    if [[ "$QB_PORT" != "8080" ]]; then
-        echo -e "${BLUE}Updating script with qBittorrent port: $QB_PORT${NC}"
-        sed -i.bak "s/QBITTORRENT_PORT=\"8080\"/QBITTORRENT_PORT=\"$QB_PORT\"/" "$MAIN_SCRIPT"
-        echo -e "${GREEN}✓ Updated script with qBittorrent port: $QB_PORT${NC}"
-    fi
+    echo -e "${GREEN}✓ Using qBittorrent port $QB_PORT (will be passed via environment)${NC}"
 else
     echo -e "${RED}✗ qBittorrent Web UI is not accessible at $QB_URL${NC}"
     echo
@@ -850,7 +923,7 @@ echo
 
 # Test the main script
 echo "Testing the port sync script..."
-if "$MAIN_SCRIPT" --check; then
+if WG_INTERFACE="$WG_INTERFACE" QB_PORT="$QB_PORT" QBITTORRENT_PORT="$QB_PORT" "$MAIN_SCRIPT" --check; then
     echo -e "${GREEN}✓ Script test completed successfully${NC}"
 else
     echo -e "${YELLOW}⚠ Script test had issues - check the output above${NC}"
@@ -860,8 +933,8 @@ fi
 echo -e "${BLUE}Automation Setup${NC}"
 echo "================"
 echo "Choose how you want to run the port sync:"
-echo "1. Cron job (every 5 minutes) - Simple and reliable"
-echo "2. Systemd service (continuous monitoring every 30 seconds) - More responsive"
+echo "1. Cron job (every 1 minute) - Keeps ProtonVPN NAT-PMP lease alive"
+echo "2. Systemd service (continuous monitoring ~45 seconds) - More responsive"
 echo "3. Both options available - install tools for flexible switching"
 echo "4. Manual setup later"
 echo
@@ -889,7 +962,7 @@ case $automation_choice in
         echo "Skipping automation setup."
         echo
         echo -e "${YELLOW}Manual setup options:${NC}"
-    echo "  Cron: crontab -e, then add: * * * * * $MAIN_SCRIPT"
+        echo "  Cron: crontab -e, then add: * * * * * $MAIN_SCRIPT"
         echo "  Service: bash $SCRIPT_DIR/service-manager.sh install"
         echo "  Manage later: bash $0 --manage"
         ;;
@@ -909,7 +982,7 @@ echo "Usage:"
 echo "  $MAIN_SCRIPT                # Normal sync operation"
 echo "  $MAIN_SCRIPT --check        # Check current status"
 echo "  $MAIN_SCRIPT --force        # Force update qBittorrent"
-echo "  $MAIN_SCRIPT --daemon       # Run as daemon service (30s intervals)"
+echo "  $MAIN_SCRIPT --daemon       # Run as daemon service (~45s intervals)"
 echo
 echo "Management Commands:"
 echo "  $0 --manage        # Manage deployments (switch between cron/service)"

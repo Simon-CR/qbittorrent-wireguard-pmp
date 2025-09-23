@@ -1,6 +1,6 @@
 ## Important: Why the 1-Minute Interval?
 
-ProtonVPN's port forwarding requires a persistent loop to keep the port open. If the loop process stops, the port will close after 60 seconds. This is why the cron job and service are designed to run the sync script every minute (cron) or every 30 seconds (service).
+ProtonVPN's port forwarding requires a persistent loop to keep the port open. If the loop process stops, the port will close after 60 seconds. This is why the cron job and service are designed to run the sync script every minute (cron) or roughly every 45 seconds (service).
 
 > "Port forwarding is now activated. Note that closing your terminal window will terminate the loop process. You will need to re-run this loop script each time you want to start a new port forwarding session or the port will only stay open for 60 seconds." — ProtonVPN Docs
 
@@ -56,8 +56,8 @@ The installation script will:
 - Test qBittorrent Web UI connectivity
 - Configure the script for your setup
 - Offer deployment options:
-  - **Cron job** (every 5 minutes) - Simple and reliable
-  - **Systemd service** (continuous monitoring every 30 seconds) - More responsive
+   - **Cron job** (every 1 minute) - Keeps ProtonVPN NAT-PMP lease alive
+   - **Systemd service** (continuous monitoring ~45 seconds) - More responsive
   - **Both options** - Install tools for flexible switching
   - **Manual setup** - Skip automation for custom setup
 
@@ -98,7 +98,7 @@ crontab -e
 - The script is lightweight and only updates qBittorrent if a change is detected, so frequent execution is safe and efficient.
 
 ### Option B: Systemd Service (Advanced users)
-- Continuous monitoring with 30-second intervals
+- Continuous monitoring with ~45-second intervals
 - More responsive to port changes
 - Includes proper logging and service management
 - Set up using the service manager:
@@ -123,7 +123,7 @@ Run the script directly when needed:
 ./port-sync.sh           # Normal sync
 ./port-sync.sh --check   # Check status only
 ./port-sync.sh --force   # Force update qBittorrent
-./port-sync.sh --daemon  # Run as daemon (30s intervals)
+./port-sync.sh --daemon  # Run as daemon (~45s intervals)
 ```
 
 ### 2. Configure qBittorrent Web UI (if using manual setup)
@@ -173,8 +173,8 @@ If you didn't use the installation script, you can set up automation manually:
 # Edit your crontab
 crontab -e
 
-# Add this line (adjust path as needed):
-*/5 * * * * /home/yourusername/qbittorrent-wireguard-pmp/port-sync.sh >/dev/null 2>&1
+# Add this line (adjust path as needed). Run every minute:
+* * * * * /home/yourusername/qbittorrent-wireguard-pmp/port-sync.sh >/dev/null 2>&1
 ```
 
 **For Systemd Service:**
@@ -185,7 +185,7 @@ crontab -e
 
 Or with logging to see cron output:
 ```bash
-*/5 * * * * /home/yourusername/qbittorrent-wireguard-pmp/port-sync.sh >> /home/yourusername/qbittorrent-wireguard-pmp/cron.log 2>&1
+* * * * * /home/yourusername/qbittorrent-wireguard-pmp/port-sync.sh >> /home/yourusername/qbittorrent-wireguard-pmp/cron.log 2>&1
 ```
 
 ## Usage
@@ -202,7 +202,7 @@ Or with logging to see cron output:
 # Force update qBittorrent to match WireGuard
 ./port-sync.sh --force
 
-# Run as daemon (continuous monitoring every 30 seconds)
+# Run as daemon (continuous monitoring ~45 seconds)
 ./port-sync.sh --daemon
 
 # Show detailed debugging information
