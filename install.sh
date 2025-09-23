@@ -78,6 +78,10 @@ ask_confirm() {
 
 # Self-update function
 self_update() {
+    local assume_yes=0
+    if [[ "${1:-}" == "--yes" ]]; then
+        assume_yes=1
+    fi
     echo -e "${BLUE}Self-Update${NC}"
     echo "==========="
     echo "Current version: $SCRIPT_VERSION"
@@ -95,7 +99,7 @@ self_update() {
                 echo
                 git log --oneline HEAD..origin/main | head -5
                 echo
-                if ask_confirm "Update to latest version?" N; then
+                if [[ $assume_yes -eq 1 ]] || ask_confirm "Update to latest version?" N; then
                     echo "Updating..."
                     
                     # Stash any local changes to preserve file permissions
@@ -140,7 +144,7 @@ self_update() {
             if ! diff -q install.sh install.sh.new >/dev/null 2>&1; then
                 echo -e "${YELLOW}⚠ Updates available!${NC}"
                 echo "Run '$0 --update' to get the latest version, or continue with current version."
-                if ! ask_confirm "Continue with current version?" Y; then
+                if [[ $assume_yes -eq 1 ]] || ! ask_confirm "Continue with current version?" Y; then
                     chmod +x install.sh
                     echo -e "${GREEN}✓ Installer updated${NC}"
                     echo "Please re-run the installer for the latest version."
@@ -521,7 +525,7 @@ if [[ -d .git ]]; then
             echo
             if ask_confirm "Update now?" Y; then
                 echo "Updating..."
-                if self_update; then
+                if self_update --yes; then
                     echo -e "${GREEN}✓ Updated. Restarting installer...${NC}"
                     exec bash "$0" "$@"
                 else
