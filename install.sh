@@ -348,6 +348,19 @@ run_deployment_setup() {
         echo "Setting up systemd service..."
         
         # Ensure required service files exist; auto-download if missing
+        # Ensure main script exists; auto-download if missing
+        if [[ ! -f "$MAIN_SCRIPT" ]]; then
+            echo "port-sync.sh not found. Attempting to download..."
+            if command -v curl >/dev/null 2>&1; then
+                if curl -fsSL -o "$MAIN_SCRIPT" "$GITHUB_RAW_URL/port-sync.sh"; then
+                    chmod +x "$MAIN_SCRIPT" || true
+                    echo "✓ Downloaded port-sync.sh"
+                else
+                    echo -e "${RED}✗ Failed to download port-sync.sh${NC}"
+                fi
+            fi
+        fi
+
         if [[ ! -f "$SCRIPT_DIR/service-manager.sh" ]]; then
             echo "service-manager.sh not found. Attempting to download..."
             if command -v curl >/dev/null 2>&1; then
