@@ -477,6 +477,7 @@ echo "===================================================="
 echo "Version: $SCRIPT_VERSION"
 echo
 
+
 # Check for updates first
 echo "Checking for updates..."
 if [[ -d .git ]]; then
@@ -485,13 +486,32 @@ if [[ -d .git ]]; then
             echo -e "${YELLOW}⚠ Updates available!${NC}"
             echo "Run '$0 --update' to get the latest version, or continue with current version."
             read -p "Continue with current version? (Y/n): " continue_install
-            if [[ "$continue_install" =~ ^[Nn]$ ]]; then
+            # Default to Yes if user presses Enter
+            if [[ -n "$continue_install" && "$continue_install" =~ ^[Nn]$ ]]; then
                 echo "Run '$0 --update' to update first."
                 exit 0
             fi
         else
             echo -e "${GREEN}✓ Already up to date${NC}"
         fi
+    fi
+fi
+
+# Check natpmpc dependency before proceeding
+if ! command -v natpmpc >/dev/null 2>&1; then
+    echo -e "${YELLOW}natpmpc not found. Attempting to install...${NC}"
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update && sudo apt-get install -y natpmpc
+    elif command -v brew >/dev/null 2>&1; then
+        brew install natpmpc
+    else
+        echo -e "${RED}Could not auto-install natpmpc. Please install it manually and re-run the installer.${NC}"
+        exit 1
+    fi
+    # Re-check natpmpc
+    if ! command -v natpmpc >/dev/null 2>&1; then
+        echo -e "${RED}natpmpc installation failed. Please install it manually and re-run the installer.${NC}"
+        exit 1
     fi
 fi
 

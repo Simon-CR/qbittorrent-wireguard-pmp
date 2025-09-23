@@ -177,19 +177,13 @@ main() {
     fi
     
 
-    # Try ProtonVPN port detection first
+    # Only use ProtonVPN NAT-PMP port
     local sync_port
-    if sync_port=$(get_protonvpn_port); then
-        log "Detected ProtonVPN NAT-PMP port: ${BLUE}$sync_port${NC}"
-    else
-        log_warning "ProtonVPN port not detected, falling back to WireGuard listen-port"
-        if ! sync_port=$(get_wireguard_port); then
-            log_error "Could not determine WireGuard listening port"
-            log_error "Please ensure WireGuard interface '${WG_INTERFACE}' is active"
-            exit 1
-        fi
-        log "Current WireGuard port: ${BLUE}$sync_port${NC}"
+    if ! sync_port=$(get_protonvpn_port); then
+        log_error "Could not determine ProtonVPN NAT-PMP port. Make sure natpmpc is installed and port forwarding is active."
+        exit 1
     fi
+    log "Detected ProtonVPN NAT-PMP port: ${BLUE}$sync_port${NC}"
 
     # Get current qBittorrent port
     local current_qbt_port
@@ -246,18 +240,13 @@ daemon_mode() {
     while true; do
         current_time=$(date +%s)
 
-        # Try ProtonVPN port detection first
+        # Only use ProtonVPN NAT-PMP port
         current_port=""
         if current_port=$(get_protonvpn_port 2>/dev/null); then
             log "[Loop] Detected ProtonVPN NAT-PMP port: ${BLUE}$current_port${NC}"
         else
-            log_warning "[Loop] ProtonVPN port not detected, falling back to WireGuard listen-port"
-            current_port=$(get_wireguard_port 2>/dev/null || echo "")
-            if [[ -n "$current_port" ]]; then
-                log "[Loop] Current WireGuard port: ${BLUE}$current_port${NC}"
-            else
-                log_error "[Loop] Could not determine WireGuard listening port"
-            fi
+            log_error "[Loop] Could not determine ProtonVPN NAT-PMP port. Make sure natpmpc is installed and port forwarding is active."
+            current_port=""
         fi
 
         if [[ -n "$current_port" ]]; then
