@@ -218,7 +218,6 @@ case "${1:-}" in
         echo -e "${CYAN}qBittorrent API test:${NC} $(curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null && echo -e "${GREEN}OK${NC}" || echo -e "${RED}FAILED${NC}")"
         
         # Show partial preferences response for debugging
-        local debug_response
         debug_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
         if [[ -n "$debug_response" ]]; then
             echo -e "${CYAN}API response contains listen_port:${NC} $(echo "$debug_response" | grep -q "listen_port" && echo -e "${GREEN}YES${NC}" || echo -e "${RED}NO${NC}")"
@@ -259,7 +258,7 @@ case "${1:-}" in
         if command -v wg >/dev/null 2>&1; then
             echo -e "  ${GREEN}✓${NC} wg command available"
             if wg show "$WG_INTERFACE" >/dev/null 2>&1; then
-                local wg_port=$(wg show "$WG_INTERFACE" listen-port 2>/dev/null || echo "")
+                wg_port=$(wg show "$WG_INTERFACE" listen-port 2>/dev/null || echo "")
                 echo -e "  ${GREEN}✓${NC} Interface $WG_INTERFACE is active"
                 echo -e "  ${GREEN}✓${NC} WireGuard port: ${BLUE}$wg_port${NC}"
             else
@@ -273,19 +272,19 @@ case "${1:-}" in
         
         echo -e "${YELLOW}Testing qBittorrent API...${NC}"
         if curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" >/dev/null 2>&1; then
-            local version=$(curl -s "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null || echo "unknown")
+            version=$(curl -s "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null || echo "unknown")
             echo -e "  ${GREEN}✓${NC} qBittorrent API accessible"
             echo -e "  ${GREEN}✓${NC} Version: ${BLUE}$version${NC}"
             
             echo "  Testing preferences API..."
-            local prefs_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
+            prefs_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
             if [[ -n "$prefs_response" ]]; then
                 echo -e "  ${GREEN}✓${NC} Preferences API working"
                 if echo "$prefs_response" | grep -q "listen_port"; then
                     echo -e "  ${GREEN}✓${NC} listen_port found in response"
-                    local port_line=$(echo "$prefs_response" | grep -o '"listen_port"[^,}]*')
+                    port_line=$(echo "$prefs_response" | grep -o '"listen_port"[^,}]*')
                     echo -e "  ${GREEN}✓${NC} Raw port data: ${BLUE}$port_line${NC}"
-                    local parsed_port=$(get_qbittorrent_port)
+                    parsed_port=$(get_qbittorrent_port)
                     echo -e "  ${GREEN}✓${NC} Parsed port: ${BLUE}'$parsed_port'${NC}"
                     if [[ -z "$parsed_port" ]]; then
                         echo -e "  ${YELLOW}⚠${NC} Port parsing failed - trying manual extraction:"
