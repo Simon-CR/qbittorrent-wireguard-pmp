@@ -347,6 +347,29 @@ run_deployment_setup() {
         echo
         echo "Setting up systemd service..."
         
+        # Ensure required service files exist; auto-download if missing
+        if [[ ! -f "$SCRIPT_DIR/service-manager.sh" ]]; then
+            echo "service-manager.sh not found. Attempting to download..."
+            if command -v curl >/dev/null 2>&1; then
+                if curl -fsSL -o "$SCRIPT_DIR/service-manager.sh" "$GITHUB_RAW_URL/service-manager.sh"; then
+                    chmod +x "$SCRIPT_DIR/service-manager.sh" || true
+                    echo "✓ Downloaded service-manager.sh"
+                else
+                    echo -e "${YELLOW}⚠ Failed to download service-manager.sh${NC}"
+                fi
+            fi
+        fi
+        if [[ ! -f "$SCRIPT_DIR/qbittorrent-wireguard-sync.service" ]]; then
+            echo "qbittorrent-wireguard-sync.service not found. Attempting to download..."
+            if command -v curl >/dev/null 2>&1; then
+                if curl -fsSL -o "$SCRIPT_DIR/qbittorrent-wireguard-sync.service" "$GITHUB_RAW_URL/qbittorrent-wireguard-sync.service"; then
+                    echo "✓ Downloaded qbittorrent-wireguard-sync.service"
+                else
+                    echo -e "${YELLOW}⚠ Failed to download qbittorrent-wireguard-sync.service${NC}"
+                fi
+            fi
+        fi
+
         if [[ -f "$SCRIPT_DIR/service-manager.sh" ]]; then
             echo -e "${CYAN}Running service installer...${NC}"
             echo "Note: This will require root privileges for systemd operations"
