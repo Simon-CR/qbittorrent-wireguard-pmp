@@ -22,9 +22,14 @@ GITHUB_RAW_URL="https://raw.githubusercontent.com/Simon-CR/qbittorrent-wireguard
 # Derive version from git if possible, else fallback
 SCRIPT_VERSION="${SCRIPT_VERSION:-$(git -C "$SCRIPT_DIR" describe --tags --always 2>/dev/null || git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "dev")}"
 
-# Deployment flags safe defaults
-setup_cron=false
-setup_service=false
+# Core project files that should be kept in sync during updates
+CORE_FILES=(
+    "install.sh"
+    "port-sync.sh"
+    "service-manager.sh"
+    "qbittorrent-wireguard-sync.service"
+    "README.md"
+)
 
 # Help function
 show_help() {
@@ -34,10 +39,68 @@ show_help() {
     echo
     echo "Options:"
     echo "  --update, -u     Self-update the installer and scripts"
-    echo "  --manage, -m     Manage existing deployments (switch between cron/service)"
+    echo "  --manage, -m     Manage the systemd service"
     echo "  --help, -h       Show this help message"
     echo
     echo "Default behavior (no options): Run the full installation/setup wizard"
+}
+
+download_core_files() {
+    if ! command -v curl >/dev/null 2>&1; then
+        echo -e "${RED}✗ curl is required to download updates${NC}"
+        return 1
+    fi
+
+    local tmpdir
+    tmpdir=$(mktemp -d) || {
+        echo -e "${RED}✗ Failed to create temporary directory for updates${NC}"
+        return 1
+    }
+
+    echo -e "${BLUE}Fetching latest project files...${NC}"
+
+    local file success=true
+    for file in "${CORE_FILES[@]}"; do
+        local remote_url="${GITHUB_RAW_URL}/${file}"
+        local tmp_path="${tmpdir}/${file}"
+
+        echo -n "  • ${file}... "
+        if curl -fsSL -o "$tmp_path" "$remote_url"; then
+            echo -e "${GREEN}ok${NC}"
+        else
+            echo -e "${RED}failed${NC}"
+            success=false
+        fi
+    done
+
+    if [[ "$success" != true ]]; then
+        echo -e "${RED}✗ One or more files could not be downloaded. Update aborted.${NC}"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    for file in "${CORE_FILES[@]}"; do
+        local tmp_path="${tmpdir}/${file}"
+        local dest_path="${SCRIPT_DIR}/${file}"
+
+        install -D "$tmp_path" "$dest_path"
+
+        case "$file" in
+            *.sh)
+                chmod 755 "$dest_path" 2>/dev/null || true
+                ;;
+            *.service)
+                chmod 644 "$dest_path" 2>/dev/null || true
+                ;;
+            *)
+                chmod 644 "$dest_path" 2>/dev/null || true
+                ;;
+        esac
+    done
+
+    rm -rf "$tmpdir"
+    echo -e "${GREEN}✓ All project files refreshed${NC}"
+    return 0
 }
 
 # Refresh installed systemd service unit to the latest template while preserving env
@@ -188,366 +251,154 @@ self_update() {
             return 1
         fi
     else
-        # Not a git repo, try downloading directly
-        echo "Not a git repository. Attempting direct download update..."
-        
-        # Download latest install.sh
-        if curl -s -o "install.sh.new" "$GITHUB_RAW_URL/install.sh"; then
-            # Check if it's different
-            if ! diff -q install.sh install.sh.new >/dev/null 2>&1; then
-                echo -e "${YELLOW}⚠ Updates available!${NC}"
-                echo "Run '$0 --update' to get the latest version, or continue with current version."
-                if [[ $assume_yes -eq 1 ]] || ! ask_confirm "Continue with current version?" Y; then
-                    chmod +x install.sh
-                    echo -e "${GREEN}✓ Installer updated${NC}"
-                    echo "Please re-run the installer for the latest version."
-                    return 0
-                else
-                    rm -f install.sh.new
-                    return 0
-                fi
-            else
-                rm -f install.sh.new
-                echo -e "${GREEN}✓ Already up to date${NC}"
-                return 0
-            fi
-        else
-            echo -e "${RED}✗ Failed to check for updates${NC}"
+        echo "Direct download mode (no git repository detected)."
+
+        local tmp_install
+        tmp_install=$(mktemp) || {
+            echo -e "${RED}✗ Failed to create temporary file for update check${NC}"
             return 1
-        fi
-    fi
-}
+        }
 
-# Check existing deployments
-check_existing_deployments() {
-    local has_cron=false
-    local has_service=false
-    
-    # Check for existing cron job
-    if crontab -l 2>/dev/null | grep -q "port-sync.sh"; then
-        has_cron=true
-    fi
-    
-    # Check for existing systemd service
-    if systemctl is-enabled qbittorrent-wireguard-sync >/dev/null 2>&1; then
-        has_service=true
-    fi
-    
-    echo "$has_cron,$has_service"
-}
-
-# Manage existing deployments
-manage_deployments() {
-    echo -e "${BLUE}Deployment Management${NC}"
-    echo "===================="
-    
-    local deployment_status
-    deployment_status=$(check_existing_deployments)
-    IFS=',' read -r has_cron has_service <<< "$deployment_status"
-    
-    echo "Current deployment status:"
-    if [[ "$has_cron" == "true" ]]; then
-        echo -e "${GREEN}✓ Cron job active${NC}"
-        crontab -l | grep "port-sync.sh"
-    else
-        echo -e "${YELLOW}○ No cron job found${NC}"
-    fi
-    
-    if [[ "$has_service" == "true" ]]; then
-        echo -e "${GREEN}✓ Systemd service installed${NC}"
-        if systemctl is-active qbittorrent-wireguard-sync >/dev/null 2>&1; then
-            echo "  Status: Running"
-        else
-            echo "  Status: Stopped"
-        fi
-    else
-        echo -e "${YELLOW}○ No systemd service found${NC}"
-    fi
-    
-    echo
-    echo "Available actions:"
-    
-    if [[ "$has_cron" == "true" && "$has_service" == "false" ]]; then
-        echo "1. Add systemd service (keep cron)"
-        echo "2. Switch to systemd service only (remove cron)"
-        echo "3. Remove cron job"
-        echo "4. Update scripts"
-        echo "5. Exit"
-    elif [[ "$has_cron" == "false" && "$has_service" == "true" ]]; then
-        echo "1. Add cron job (keep service)"
-        echo "2. Switch to cron job only (remove service)"
-        echo "3. Remove systemd service"
-        echo "4. Update scripts"
-        echo "5. Exit"
-    elif [[ "$has_cron" == "true" && "$has_service" == "true" ]]; then
-        echo "1. Switch to cron job only (remove service)"
-        echo "2. Switch to systemd service only (remove cron)"
-        echo "3. Remove both"
-        echo "4. Update scripts"
-        echo "5. Exit"
-    else
-        echo "1. Set up cron job"
-        echo "2. Set up systemd service"
-        echo "3. Set up both"
-        echo "4. Update scripts"
-        echo "5. Exit"
-    fi
-    
-    echo
-    read -p "Choose action [1-5]: " action
-    
-    case $action in
-        1)
-            if [[ "$has_cron" == "true" && "$has_service" == "false" ]]; then
-                setup_service=true
-                setup_cron=false
-                echo "Adding systemd service..."
-            elif [[ "$has_cron" == "false" && "$has_service" == "true" ]]; then
-                setup_cron=true
-                setup_service=false
-                echo "Adding cron job..."
-            elif [[ "$has_cron" == "true" && "$has_service" == "true" ]]; then
-                remove_service
-                echo "Switched to cron job only."
-                return 0
-            else
-                setup_cron=true
-                setup_service=false
-                echo "Setting up cron job..."
-            fi
-            ;;
-        2)
-            if [[ "$has_cron" == "true" && "$has_service" == "false" ]]; then
-                remove_cron
-                setup_service=true
-                setup_cron=false
-                echo "Switching to systemd service..."
-            elif [[ "$has_cron" == "false" && "$has_service" == "true" ]]; then
-                remove_service
-                setup_cron=true
-                setup_service=false
-                echo "Switching to cron job..."
-            elif [[ "$has_cron" == "true" && "$has_service" == "true" ]]; then
-                remove_cron
-                echo "Switched to systemd service only."
-                return 0
-            else
-                setup_service=true
-                setup_cron=false
-                echo "Setting up systemd service..."
-            fi
-            ;;
-        3)
-            if [[ "$has_cron" == "true" && "$has_service" == "true" ]]; then
-                remove_cron
-                remove_service
-                echo "Removed both deployments."
-                return 0
-            elif [[ "$has_cron" == "true" ]]; then
-                remove_cron
-                echo "Removed cron job."
-                return 0
-            elif [[ "$has_service" == "true" ]]; then
-                remove_service
-                echo "Removed systemd service."
-                return 0
-            else
-                setup_cron=true
-                setup_service=true
-                echo "Setting up both options..."
-            fi
-            ;;
-        4)
-            echo "Updating scripts..."
-            self_update
-            return $?
-            ;;
-        5)
-            echo "Exiting."
-            return 0
-            ;;
-        *)
-            echo "Invalid choice."
-            return 1
-            ;;
-    esac
-    
-    # Execute the deployment setup
-    run_deployment_setup
-}
-
-# Remove cron job
-remove_cron() {
-    echo "Removing cron job..."
-    temp_cron=$(mktemp)
-    crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
-    if crontab "$temp_cron"; then
-        echo -e "${GREEN}✓ Cron job removed${NC}"
-    else
-        echo -e "${RED}✗ Failed to remove cron job${NC}"
-    fi
-    rm -f "$temp_cron"
-}
-
-# Remove systemd service
-remove_service() {
-    echo "Removing systemd service..."
-    if [[ -f "$SCRIPT_DIR/service-manager.sh" ]]; then
-        if bash "$SCRIPT_DIR/service-manager.sh" uninstall; then
-            echo -e "${GREEN}✓ Systemd service removed${NC}"
-        else
-            echo -e "${RED}✗ Failed to remove systemd service${NC}"
-        fi
-    else
-        echo -e "${YELLOW}⚠ service-manager.sh not found${NC}"
-    fi
-}
-
-# Run deployment setup (shared logic)
-run_deployment_setup() {
-    # Set up cron job if requested
-    if [[ "$setup_cron" == "true" ]]; then
-        echo
-        echo "Setting up cron job..."
-        
-        # Create temporary cron file
-        temp_cron=$(mktemp)
-        
-        # Get existing crontab (excluding old port-sync entries)
-        crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
-        
-    # Add new cron job (every minute) with env for selected interface and port
-    echo "* * * * * WG_INTERFACE=$WG_INTERFACE QB_PORT=$QB_PORT QBITTORRENT_PORT=$QB_PORT $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
-        
-        # Install new crontab
-        if crontab "$temp_cron"; then
-            echo "✓ Cron job added successfully"
-            echo "The script will now run every 1 minute automatically."
-        else
-            echo "✗ Failed to install cron job"
-        fi
-        
-        # Clean up
-        rm -f "$temp_cron"
-    fi
-
-    # Set up systemd service if requested
-    if [[ "$setup_service" == "true" ]]; then
-        echo
-        echo "Setting up systemd service..."
-        
-        # Ensure required service files exist; auto-download if missing
-        # Ensure main script exists; auto-download if missing
-        if [[ ! -f "$MAIN_SCRIPT" ]]; then
-            echo "port-sync.sh not found. Attempting to download..."
-            if command -v curl >/dev/null 2>&1; then
-                if curl -fsSL -o "$MAIN_SCRIPT" "$GITHUB_RAW_URL/port-sync.sh"; then
-                    chmod +x "$MAIN_SCRIPT" || true
-                    echo "✓ Downloaded port-sync.sh"
-                else
-                    echo -e "${RED}✗ Failed to download port-sync.sh${NC}"
-                fi
-            fi
-        fi
-
-        if [[ ! -f "$SCRIPT_DIR/service-manager.sh" ]]; then
-            echo "service-manager.sh not found. Attempting to download..."
-            if command -v curl >/dev/null 2>&1; then
-                if curl -fsSL -o "$SCRIPT_DIR/service-manager.sh" "$GITHUB_RAW_URL/service-manager.sh"; then
-                    chmod +x "$SCRIPT_DIR/service-manager.sh" || true
-                    echo "✓ Downloaded service-manager.sh"
-                else
-                    echo -e "${YELLOW}⚠ Failed to download service-manager.sh${NC}"
-                fi
-            fi
-        fi
-        if [[ ! -f "$SCRIPT_DIR/qbittorrent-wireguard-sync.service" ]]; then
-            echo "qbittorrent-wireguard-sync.service not found. Attempting to download..."
-            if command -v curl >/dev/null 2>&1; then
-                if curl -fsSL -o "$SCRIPT_DIR/qbittorrent-wireguard-sync.service" "$GITHUB_RAW_URL/qbittorrent-wireguard-sync.service"; then
-                    echo "✓ Downloaded qbittorrent-wireguard-sync.service"
-                else
-                    echo -e "${YELLOW}⚠ Failed to download qbittorrent-wireguard-sync.service${NC}"
-                fi
-            fi
-        fi
-
-        if [[ -f "$SCRIPT_DIR/service-manager.sh" ]]; then
-            echo -e "${CYAN}Running service installer...${NC}"
-            echo "Note: This will require root privileges for systemd operations"
-            
-            # Use values selected earlier in this installer session
-            SM_WG="$WG_INTERFACE"
-            SM_QP="$QB_PORT"
-            # Try to derive NAT-PMP gateway from the selected interface IP (x.y.z.1)
-            SM_GW=""
-            if command -v ip >/dev/null 2>&1; then
-                IFIP=$(ip -4 addr show dev "$SM_WG" 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d'/' -f1)
-                if [[ "$IFIP" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
-                    SM_GW="${BASH_REMATCH[1]}.1"
-                fi
-            fi
-            # Optional quick validation of NAT-PMP gateway
-            if [[ -n "$SM_GW" ]]; then
-                if natpmpc -g "$SM_GW" -a 1 0 udp 1 >/dev/null 2>&1; then
-                    echo "Detected NAT-PMP gateway: $SM_GW"
-                else
-                    echo -e "${YELLOW}⚠ NAT-PMP gateway validation failed for $SM_GW. Proceeding without explicit gateway.${NC}"
-                    SM_GW=""
-                fi
-            else
-                echo -e "${YELLOW}⚠ Could not derive NAT-PMP gateway from interface $SM_WG. Service installer will attempt auto-detection.${NC}"
-            fi
-
-            # Run service-manager and capture output for better diagnostics
-            _svc_tmp=$(mktemp)
-            if bash "$SCRIPT_DIR/service-manager.sh" --install -y --wg-interface "$SM_WG" --qb-port "$SM_QP" ${SM_GW:+--natpmp-gateway "$SM_GW"} --start >"$_svc_tmp" 2>&1; then
-                echo "✓ Systemd service set up successfully"
-                echo "  Use 'bash $SCRIPT_DIR/service-manager.sh status' to check status"
-                echo "  Use 'bash $SCRIPT_DIR/service-manager.sh logs' to view logs"
-                echo "  Use 'bash $SCRIPT_DIR/service-manager.sh stop' to stop the service"
-                rm -f "$_svc_tmp"
-            else
-                echo "✗ Failed to set up systemd service"
-                echo -e "${YELLOW}— Service installer output (last 50 lines) —${NC}"
-                tail -n 50 "$_svc_tmp" || true
-                rm -f "$_svc_tmp"
-                if [[ "$setup_cron" != "true" ]]; then
-                    echo "Would you like to fall back to cron job setup instead?"
-                    read -p "Set up cron job? (y/N): " fallback_cron
-                    if [[ "$fallback_cron" =~ ^[Yy]$ ]]; then
-                        setup_cron=true
-                        # Run the cron setup section
+        if curl -fsSL -o "$tmp_install" "$GITHUB_RAW_URL/install.sh"; then
+            if ! cmp -s "$SCRIPT_DIR/install.sh" "$tmp_install"; then
+                echo -e "${YELLOW}⚠ Updates available for project files${NC}"
+                if [[ $assume_yes -eq 1 ]] || ask_confirm "Download and replace core files now?" Y; then
+                    if download_core_files; then
                         echo
-                        echo "Setting up cron job as fallback..."
-                        temp_cron=$(mktemp)
-                        crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
-                        echo "* * * * * WG_INTERFACE=$WG_INTERFACE QB_PORT=$QB_PORT QBITTORRENT_PORT=$QB_PORT $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
-                        if crontab "$temp_cron"; then
-                            echo "✓ Cron job added successfully as fallback"
-                        fi
-                        rm -f "$temp_cron"
+                        echo -e "${GREEN}✓ Update complete. Please re-run the installer.${NC}"
+                        rm -f "$tmp_install"
+                        return 0
+                    else
+                        rm -f "$tmp_install"
+                        return 1
                     fi
+                else
+                    echo "Continuing with current version."
                 fi
+            else
+                echo -e "${GREEN}✓ Already up to date${NC}"
             fi
+            rm -f "$tmp_install"
+            return 0
         else
-            echo -e "${RED}Error: service-manager.sh not found${NC}"
-            if [[ "$setup_cron" != "true" ]]; then
-                echo "Falling back to cron job setup..."
-                setup_cron=true
-                # Run the cron setup section as fallback
-                echo
-                echo "Setting up cron job as fallback..."
-                temp_cron=$(mktemp)
-                crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
-                echo "* * * * * WG_INTERFACE=$WG_INTERFACE QB_PORT=$QB_PORT QBITTORRENT_PORT=$QB_PORT $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
-                if crontab "$temp_cron"; then
-                    echo "✓ Cron job added successfully as fallback"
-                fi
-                rm -f "$temp_cron"
-            fi
+            echo -e "${RED}✗ Failed to check for updates (network/curl issue)${NC}"
+            rm -f "$tmp_install"
+            return 1
         fi
     fi
+}
+
+# Service helpers
+service_installed() {
+    systemctl is-enabled qbittorrent-wireguard-sync >/dev/null 2>&1
+}
+
+ensure_service_assets() {
+    if [[ ! -f "$MAIN_SCRIPT" ]]; then
+        echo "port-sync.sh not found. Attempting to download..."
+        if command -v curl >/dev/null 2>&1 && curl -fsSL -o "$MAIN_SCRIPT" "$GITHUB_RAW_URL/port-sync.sh"; then
+            chmod +x "$MAIN_SCRIPT"
+            echo -e "  ${GREEN}✓ port-sync.sh downloaded${NC}"
+        else
+            echo -e "  ${RED}✗ Failed to download port-sync.sh${NC}"
+        fi
+    fi
+
+    if [[ ! -f "$SCRIPT_DIR/service-manager.sh" ]]; then
+        echo "service-manager.sh not found. Downloading..."
+        if command -v curl >/dev/null 2>&1 && curl -fsSL -o "$SCRIPT_DIR/service-manager.sh" "$GITHUB_RAW_URL/service-manager.sh"; then
+            chmod +x "$SCRIPT_DIR/service-manager.sh"
+            echo -e "  ${GREEN}✓ service-manager.sh downloaded${NC}"
+        else
+            echo -e "  ${RED}✗ Failed to download service-manager.sh${NC}"
+        fi
+    fi
+
+    if [[ ! -f "$SCRIPT_DIR/qbittorrent-wireguard-sync.service" ]]; then
+        echo "qbittorrent-wireguard-sync.service missing. Downloading..."
+        if command -v curl >/dev/null 2>&1 && curl -fsSL -o "$SCRIPT_DIR/qbittorrent-wireguard-sync.service" "$GITHUB_RAW_URL/qbittorrent-wireguard-sync.service"; then
+            echo -e "  ${GREEN}✓ Service unit template downloaded${NC}"
+        else
+            echo -e "  ${RED}✗ Failed to download service unit template${NC}"
+        fi
+    fi
+}
+
+install_or_update_service() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo -e "${RED}✗ systemctl not available. Systemd service cannot be installed.${NC}"
+        return 1
+    fi
+
+    ensure_service_assets
+
+    if [[ ! -f "$SCRIPT_DIR/service-manager.sh" ]]; then
+        echo -e "${RED}✗ service-manager.sh could not be downloaded${NC}"
+        return 1
+    fi
+
+    echo -e "${BLUE}Configuring systemd service...${NC}"
+
+    local sm_gateway=""
+    if command -v ip >/dev/null 2>&1; then
+        local if_ip
+        if_ip=$(ip -4 addr show dev "$WG_INTERFACE" 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d'/' -f1)
+        if [[ "$if_ip" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+            sm_gateway="${BASH_REMATCH[1]}.1"
+        fi
+    fi
+
+    if [[ -n "$sm_gateway" ]]; then
+        if natpmpc -g "$sm_gateway" -a 1 0 udp 1 >/dev/null 2>&1; then
+            echo "  NAT-PMP gateway: $sm_gateway"
+        else
+            echo -e "${YELLOW}⚠ Unable to validate NAT-PMP gateway $sm_gateway, proceeding without explicit gateway.${NC}"
+            sm_gateway=""
+        fi
+    else
+        echo -e "${YELLOW}⚠ Unable to derive NAT-PMP gateway automatically.${NC}"
+    fi
+
+    local svc_log
+    svc_log=$(mktemp)
+    if bash "$SCRIPT_DIR/service-manager.sh" --install -y \
+        --wg-interface "$WG_INTERFACE" --qb-port "$QB_PORT" \
+        ${sm_gateway:+--natpmp-gateway "$sm_gateway"} --start >"$svc_log" 2>&1; then
+        echo -e "${GREEN}✓ Systemd service installed/updated${NC}"
+        rm -f "$svc_log"
+        return 0
+    else
+        echo -e "${RED}✗ Failed to configure systemd service${NC}"
+        echo -e "${YELLOW}— Service installer output (last 50 lines) —${NC}"
+        tail -n 50 "$svc_log" || true
+        rm -f "$svc_log"
+        return 1
+    fi
+}
+
+remove_service() {
+    if [[ -f "$SCRIPT_DIR/service-manager.sh" ]]; then
+        bash "$SCRIPT_DIR/service-manager.sh" --uninstall
+    else
+        echo -e "${YELLOW}⚠ service-manager.sh missing; attempting manual removal${NC}"
+        sudo systemctl stop qbittorrent-wireguard-sync 2>/dev/null || true
+        sudo systemctl disable qbittorrent-wireguard-sync 2>/dev/null || true
+        sudo rm -f /etc/systemd/system/qbittorrent-wireguard-sync.service
+        sudo systemctl daemon-reload
+    fi
+}
+
+manage_deployments() {
+    echo -e "${BLUE}Service Management${NC}"
+    echo "=================="
+
+    ensure_service_assets
+    if [[ ! -f "$SCRIPT_DIR/service-manager.sh" ]]; then
+        echo -e "${RED}✗ service-manager.sh is unavailable; try running '$0 --update' first.${NC}"
+        return 1
+    fi
+    chmod +x "$SCRIPT_DIR/service-manager.sh" 2>/dev/null || true
+    bash "$SCRIPT_DIR/service-manager.sh"
 }
 
 # Check for command line arguments
@@ -567,7 +418,7 @@ case "${1:-}" in
 esac
 
 # Installation script for qBittorrent WireGuard Port Sync
-# This script helps set up the port sync script and cron job
+# This script helps set up the port sync script and systemd service
 
 :
 
@@ -595,7 +446,7 @@ echo
 
 # Check for updates first
 echo "Checking for updates..."
-if [[ -d .git ]]; then
+if [[ -d .git ]] && command -v git >/dev/null 2>&1; then
     if git fetch origin main >/dev/null 2>&1; then
         if ! git diff --quiet HEAD origin/main; then
             echo -e "${YELLOW}⚠ Updates available!${NC}"
@@ -623,6 +474,33 @@ if [[ -d .git ]]; then
             refresh_service_unit
         fi
     fi
+else
+    if command -v curl >/dev/null 2>&1; then
+        local tmp_remote_install
+        tmp_remote_install=$(mktemp) || true
+        if [[ -n "$tmp_remote_install" ]] && curl -fsSL -o "$tmp_remote_install" "$GITHUB_RAW_URL/install.sh"; then
+            if [[ ! -f "$SCRIPT_DIR/install.sh" ]] || ! cmp -s "$SCRIPT_DIR/install.sh" "$tmp_remote_install"; then
+                echo -e "${YELLOW}⚠ Updates available!${NC}"
+                if ask_confirm "Download latest project files now?" Y; then
+                    if download_core_files; then
+                        echo -e "${GREEN}✓ Update complete. Restarting installer...${NC}"
+                        rm -f "$tmp_remote_install"
+                        exec bash "$0" "$@"
+                    else
+                        echo -e "${YELLOW}⚠ Update failed or skipped.${NC}"
+                    fi
+                else
+                    echo "Continuing with current version."
+                fi
+            else
+                echo -e "${GREEN}✓ Already up to date${NC}"
+                refresh_service_unit
+            fi
+        fi
+        rm -f "$tmp_remote_install" 2>/dev/null || true
+    else
+        echo -e "${YELLOW}⚠ Skipping update check (curl not available)${NC}"
+    fi
 fi
 
 # Check natpmpc dependency before proceeding
@@ -643,40 +521,33 @@ if ! command -v natpmpc >/dev/null 2>&1; then
     fi
 fi
 
-# Check if this is a re-run (existing deployments)
-deployment_status=$(check_existing_deployments)
-IFS=',' read -r has_existing_cron has_existing_service <<< "$deployment_status"
-
-if [[ "$has_existing_cron" == "true" || "$has_existing_service" == "true" ]]; then
-    echo -e "${YELLOW}Existing deployment detected!${NC}"
-    echo "Current status:"
-    if [[ "$has_existing_cron" == "true" ]]; then
-        echo -e "${GREEN}✓ Cron job active${NC}"
-    fi
-    if [[ "$has_existing_service" == "true" ]]; then
-        echo -e "${GREEN}✓ Systemd service installed${NC}"
-    fi
+# Check if this is a re-run (existing service deployment)
+service_present=false
+if service_installed; then
+    service_present=true
+    echo -e "${YELLOW}Existing systemd service detected.${NC}"
+    echo "  Use '--manage' to launch the service manager directly."
     echo
     echo "Options:"
-    echo "1. Continue with full setup (may reconfigure)"
-    echo "2. Manage existing deployments (recommended)"
+    echo "1. Continue with setup (reconfigure service)"
+    echo "2. Open service manager"
     echo "3. Exit"
     read -p "Choose option [1-3]: " existing_choice
-    
+
     case $existing_choice in
         1)
-            echo "Continuing with full setup..."
+            echo "Continuing with setup..."
             ;;
         2)
             manage_deployments
             exit $?
             ;;
         3)
-            echo "Exiting. Use '$0 --manage' to manage deployments later."
+            echo "Exiting. Use '$0 --manage' anytime to manage the service."
             exit 0
             ;;
         *)
-            echo "Invalid choice, continuing with full setup..."
+            echo "Continuing with setup..."
             ;;
     esac
     echo
@@ -929,50 +800,13 @@ else
     echo -e "${YELLOW}⚠ Script test had issues - check the output above${NC}"
 fi
 
-# Offer to set up cron job or systemd service
-echo -e "${BLUE}Automation Setup${NC}"
-echo "================"
-echo "Choose how you want to run the port sync:"
-echo "1. Cron job (every 1 minute) - Keeps ProtonVPN NAT-PMP lease alive"
-echo "2. Systemd service (continuous monitoring ~45 seconds) - More responsive"
-echo "3. Both options available - install tools for flexible switching"
-echo "4. Manual setup later"
 echo
-
-read -p "Choose option [1-4]: " automation_choice
-
-setup_cron=false
-setup_service=false
-
-case $automation_choice in
-    1)
-        echo "Setting up cron job only..."
-        setup_cron=true
-        ;;
-    2)
-        echo "Setting up systemd service only..."
-        setup_service=true
-        ;;
-    3)
-        echo "Setting up both options for maximum flexibility..."
-        setup_cron=true
-        setup_service=true
-        ;;
-    4)
-        echo "Skipping automation setup."
-        echo
-        echo -e "${YELLOW}Manual setup options:${NC}"
-        echo "  Cron: crontab -e, then add: * * * * * $MAIN_SCRIPT"
-        echo "  Service: bash $SCRIPT_DIR/service-manager.sh install"
-        echo "  Manage later: bash $0 --manage"
-        ;;
-    *)
-        echo "Invalid choice, skipping automation setup."
-        ;;
-esac
-
-# Use the shared deployment setup logic
-run_deployment_setup
+if ask_confirm "Install or update the systemd service for continuous syncing?" Y; then
+    install_or_update_service || echo -e "${YELLOW}⚠ Service installation encountered issues (see above).${NC}"
+else
+    echo -e "${YELLOW}Skipping service installation. You can manage it later with:${NC}"
+    echo "  $0 --manage"
+fi
 
 echo
 echo "Installation Complete!"
@@ -985,24 +819,16 @@ echo "  $MAIN_SCRIPT --force        # Force update qBittorrent"
 echo "  $MAIN_SCRIPT --daemon       # Run as daemon service (~45s intervals)"
 echo
 echo "Management Commands:"
-echo "  $0 --manage        # Manage deployments (switch between cron/service)"
+echo "  $0 --manage        # Launch interactive service manager"
 echo "  $0 --update        # Self-update to latest version"
 echo "  $0 --help          # Show help"
 echo
-if [[ "$setup_service" == "true" ]]; then
-    echo "Service Management:"
-    echo "  bash $SCRIPT_DIR/service-manager.sh status   # Check service status"
-    echo "  bash $SCRIPT_DIR/service-manager.sh logs     # View service logs"
-    echo "  bash $SCRIPT_DIR/service-manager.sh stop     # Stop service"
-    echo "  bash $SCRIPT_DIR/service-manager.sh start    # Start service"
-    echo
-fi
-if [[ "$setup_cron" == "true" ]]; then
-    echo "Cron Job Management:"
-    echo "  crontab -l                  # View current cron jobs"
-    echo "  crontab -e                  # Edit cron jobs"
-    echo
-fi
+echo "Service Management Shortcuts:"
+echo "  bash $SCRIPT_DIR/service-manager.sh status   # Check service status"
+echo "  bash $SCRIPT_DIR/service-manager.sh logs     # View service logs"
+echo "  bash $SCRIPT_DIR/service-manager.sh restart  # Restart service"
+echo "  bash $SCRIPT_DIR/service-manager.sh uninstall# Remove service"
+echo
 echo "Log files:"
 echo "  $SCRIPT_DIR/port-sync.log    # Activity log"
 echo
