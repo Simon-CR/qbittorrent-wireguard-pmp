@@ -40,6 +40,42 @@ show_help() {
     echo "Default behavior (no options): Run the full installation/setup wizard"
 }
 
+# Prompt helper: confirm with default
+# Usage: ask_confirm "Message" [Default]
+# Default: "Y" or "N" (case-insensitive). Returns 0 for Yes, 1 for No.
+ask_confirm() {
+    local prompt="$1"
+    local default="${2:-Y}"
+    local def_upper def_suffix reply
+    def_upper=$(echo "$default" | tr '[:lower:]' '[:upper:]')
+    if [[ "$def_upper" == "Y" ]]; then
+        def_suffix="(Y/n)"
+    else
+        def_suffix="(y/N)"
+    fi
+    read -r -p "$prompt $def_suffix: " reply
+    if [[ -z "$reply" ]]; then
+        # Empty input -> take default
+        if [[ "$def_upper" == "Y" ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    case "$(echo "$reply" | tr '[:upper:]' '[:lower:]')" in
+        y|yes) return 0 ;;
+        n|no)  return 1 ;;
+        *)
+            # Unrecognized -> take default
+            if [[ "$def_upper" == "Y" ]]; then
+                return 0
+            else
+                return 1
+            fi
+            ;;
+    esac
+}
+
 # Self-update function
 self_update() {
     echo -e "${BLUE}Self-Update${NC}"
@@ -59,9 +95,7 @@ self_update() {
                 echo
                 git log --oneline HEAD..origin/main | head -5
                 echo
-                read -p "Update to latest version? (y/N): " do_update
-                
-                if [[ "$do_update" =~ ^[Yy]$ ]]; then
+                if ask_confirm "Update to latest version?" N; then
                     echo "Updating..."
                     
                     # Stash any local changes to preserve file permissions
@@ -104,11 +138,9 @@ self_update() {
         if curl -s -o "install.sh.new" "$GITHUB_RAW_URL/install.sh"; then
             # Check if it's different
             if ! diff -q install.sh install.sh.new >/dev/null 2>&1; then
-                echo -e "${YELLOW}Updates available!${NC}"
-                read -p "Update installer? (y/N): " do_update
-                
-                if [[ "$do_update" =~ ^[Yy]$ ]]; then
-                    mv install.sh.new install.sh
+                echo -e "${YELLOW}⚠ Updates available!${NC}"
+                echo "Run '$0 --update' to get the latest version, or continue with current version."
+                if ! ask_confirm "Continue with current version?" Y; then
                     chmod +x install.sh
                     echo -e "${GREEN}✓ Installer updated${NC}"
                     echo "Please re-run the installer for the latest version."
@@ -484,12 +516,23 @@ if [[ -d .git ]]; then
     if git fetch origin main >/dev/null 2>&1; then
         if ! git diff --quiet HEAD origin/main; then
             echo -e "${YELLOW}⚠ Updates available!${NC}"
-            echo "Run '$0 --update' to get the latest version, or continue with current version."
-            read -p "Continue with current version? (Y/n): " continue_install
-            # Default to Yes if user presses Enter
-            if [[ -n "$continue_install" && "$continue_install" =~ ^[Nn]$ ]]; then
-                echo "Run '$0 --update' to update first."
-                exit 0
+            echo
+            git --no-pager log --oneline HEAD..origin/main | head -5
+            echo
+            if ask_confirm "Update now?" Y; then
+                echo "Updating..."
+                if self_update; then
+                    echo -e "${GREEN}✓ Updated. Restarting installer...${NC}"
+                    exec bash "$0" "$@"
+                else
+                    echo -e "${YELLOW}⚠ Update failed or skipped.${NC}"
+                    if ! ask_confirm "Continue with current version?" Y; then
+                        echo "Exiting. Run '$0 --update' to retry update."
+                        exit 1
+                    fi
+                fi
+            else
+                echo "Continuing with current version."
             fi
         else
             echo -e "${GREEN}✓ Already up to date${NC}"
