@@ -24,10 +24,12 @@ NC='\033[0m' # No Color
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SCRIPT_DIR}/port-sync.log"
-QBITTORRENT_HOST="localhost"
-QBITTORRENT_PORT="8080"
+DEBUG="${DEBUG:-0}"
+QBITTORRENT_HOST="${QBITTORRENT_HOST:-localhost}"
+# Allow service env var QB_PORT or QBITTORRENT_PORT to override default 8080
+QBITTORRENT_PORT="${QBITTORRENT_PORT:-${QB_PORT:-8080}}"
 QBITTORRENT_URL="http://${QBITTORRENT_HOST}:${QBITTORRENT_PORT}"
-WG_INTERFACE="wg0"  # Default WireGuard interface name
+WG_INTERFACE="${WG_INTERFACE:-wg0}"  # Default WireGuard interface name
 
 # Colored logging function
 log() {
@@ -50,8 +52,16 @@ log_warning() {
     echo -e "${YELLOW}${message}${NC}" | tee -a "$LOG_FILE"
 }
 
+# Debug logging (only when DEBUG=1)
+debug() {
+    if [[ "$DEBUG" == "1" ]]; then
+        local message="[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: $1"
+        echo -e "${BLUE}${message}${NC}" | tee -a "$LOG_FILE"
+    fi
+}
 
-# Get external port from natpmpc (ProtonVPN)
+
+"# Get external port by requesting/refreshing NAT-PMP mapping (ProtonVPN)"
 get_protonvpn_port() {
     if ! command -v natpmpc >/dev/null 2>&1; then
         log_warning "natpmpc not found, attempting to install..."
@@ -64,12 +74,58 @@ get_protonvpn_port() {
             return 1
         fi
     fi
-    local port_line port
-    port_line=$(natpmpc -g | grep -E "Public Port" | grep -Eo '[0-9]+' | head -1)
-    if [[ -n "$port_line" && "$port_line" =~ ^[0-9]+$ ]]; then
-        echo "$port_line"
+
+    local gw="${NATPMP_GATEWAY:-}"
+    if [[ -z "$gw" ]]; then
+        # Heuristic: derive gateway as x.y.z.1 from wg interface IPv4
+        local iface_ip
+        iface_ip=$(ip -4 addr show dev "$WG_INTERFACE" 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d'/' -f1)
+        if [[ "$iface_ip" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+            gw="${BASH_REMATCH[1]}.1"
+            debug "Derived NAT-PMP gateway from $WG_INTERFACE IP $iface_ip -> $gw"
+        fi
+    else
+        debug "Using NATPMP_GATEWAY from env: $gw"
+    fi
+
+    local gw_args=()
+    if [[ -n "$gw" ]]; then
+        gw_args=("-g" "$gw")
+        log "Using NAT-PMP gateway: ${BLUE}$gw${NC}"
+    else
+        log_warning "NATPMP_GATEWAY not set and could not derive from $WG_INTERFACE; attempting without -g (may fail)"
+    fi
+
+    # Request/refresh a 60-second mapping for UDP and TCP
+    local out_udp out_tcp port_udp port_tcp rc
+    out_udp=$(natpmpc "${gw_args[@]}" -a 1 0 udp 60 2>&1) || rc=$?
+    rc=${rc:-0}
+    debug "natpmpc -a udp exit=$rc output: ${out_udp//$'\n'/ | }"
+    out_tcp=$(natpmpc "${gw_args[@]}" -a 1 0 tcp 60 2>&1) || rc=$?
+    rc=${rc:-0}
+    debug "natpmpc -a tcp exit=$rc output: ${out_tcp//$'\n'/ | }"
+
+    # Extract mapped public port
+    port_udp=$(echo "$out_udp" | grep -Eo 'Mapped public port[^0-9]*[0-9]+' | grep -Eo '[0-9]+' | head -1)
+    port_tcp=$(echo "$out_tcp" | grep -Eo 'Mapped public port[^0-9]*[0-9]+' | grep -Eo '[0-9]+' | head -1)
+
+    local port=""
+    if [[ "$port_udp" =~ ^[0-9]+$ ]]; then port="$port_udp"; fi
+    if [[ "$port_tcp" =~ ^[0-9]+$ ]]; then
+        if [[ -z "$port" ]]; then
+            port="$port_tcp"
+        elif [[ "$port" != "$port_tcp" ]]; then
+            log_warning "UDP/TCP mapped ports differ (udp=$port tcp=$port_tcp); using UDP value"
+        fi
+    fi
+
+    if [[ -n "$port" ]]; then
+        log "NAT-PMP mapped public port: ${GREEN}$port${NC}"
+        echo "$port"
         return 0
     fi
+
+    log_error "Failed to obtain NAT-PMP mapped public port. Set NATPMP_GATEWAY (e.g., 10.x.x.1)."
     return 1
 }
 
@@ -226,14 +282,15 @@ main() {
 # Daemon mode - continuous monitoring with event detection
 daemon_mode() {
     log "Starting daemon mode - continuous port monitoring"
-    log "Monitoring WireGuard interface: $WG_INTERFACE"
+    log "Monitoring VPN interface: $WG_INTERFACE"
     log "Monitoring qBittorrent at: $QBITTORRENT_URL"
+    log "Debug logging: $([[ "$DEBUG" == "1" ]] && echo Enabled || echo Disabled)"
     
     # Initial sync
     main
 
     local last_port=""
-    local check_interval=30  # Check every 30 seconds (more responsive than cron)
+    local check_interval=45  # Refresh NAT-PMP mapping before 60s expiry
     local config_check_interval=300  # Check config file changes every 5 minutes
     local last_config_check=0
 

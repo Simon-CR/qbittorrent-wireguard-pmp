@@ -26,6 +26,7 @@ ReadWritePaths=%h/qbittorrent-wireguard-pmp
 # Environment
 Environment=WG_INTERFACE=wg0
 Environment=QB_PORT=8080
+Environment=NATPMP_GATEWAY=
 
 # Notes:
 # - The script runs in daemon mode, checking for port changes every 30 seconds.

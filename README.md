@@ -210,6 +210,26 @@ Or with logging to see cron output:
 
 # Show help
 ./port-sync.sh --help
+
+### Logging & Troubleshooting
+
+- Logs are written to `port-sync.log` in the project directory and to the systemd journal when running as a service.
+- Enable verbose NAT-PMP diagnostics by setting `DEBUG=1`:
+
+```bash
+DEBUG=1 ./port-sync.sh --check
+DEBUG=1 ./port-sync.sh --daemon
+```
+
+- For service logs:
+
+```bash
+journalctl -u qbittorrent-wireguard-sync -f
+```
+
+- qBittorrent API target can be customized via env vars:
+   - `QBITTORRENT_HOST` (default `localhost`)
+   - `QBITTORRENT_PORT` or `QB_PORT` (default `8080`)
 ```
 
 ### Output Examples

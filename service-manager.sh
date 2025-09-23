@@ -34,6 +34,7 @@ NONINTERACTIVE=0
 START_AFTER=0
 WG_ARG="${WG_INTERFACE:-}"
 QB_ARG="${QB_PORT:-}"
+GW_ARG="${NATPMP_GATEWAY:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -55,6 +56,8 @@ while [[ $# -gt 0 ]]; do
             WG_ARG="$2"; shift 2 ;;
         --qb-port|--port|-p)
             QB_ARG="$2"; shift 2 ;;
+        --natpmp-gateway|--gateway|-g)
+            GW_ARG="$2"; shift 2 ;;
         *)
             break ;;
     esac
@@ -91,31 +94,48 @@ do_install() {
     # Detect current configuration
     WG_DET="wg0"
     QB_DET="8080"
+    GW_DET=""
     if grep -q 'WG_INTERFACE=' "$SCRIPT_DIR/port-sync.sh"; then
         WG_DET=$(grep 'WG_INTERFACE=' "$SCRIPT_DIR/port-sync.sh" | head -1 | cut -d'"' -f2)
     fi
     if grep -q 'QBITTORRENT_PORT=' "$SCRIPT_DIR/port-sync.sh"; then
         QB_DET=$(grep 'QBITTORRENT_PORT=' "$SCRIPT_DIR/port-sync.sh" | head -1 | cut -d'"' -f2)
     fi
+    # Try to derive gateway from wg interface IP
+    if command -v ip >/dev/null 2>&1; then
+        IFIP=$(ip -4 addr show dev "$WG_DET" 2>/dev/null | awk '/inet /{print $2}' | head -1 | cut -d'/' -f1)
+        if [[ "$IFIP" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+            GW_DET="${BASH_REMATCH[1]}.1"
+        fi
+    fi
 
     # Apply CLI/env overrides
     WG_VAL="${WG_ARG:-$WG_DET}"
     QB_VAL="${QB_ARG:-$QB_DET}"
+    GW_VAL="${GW_ARG:-$GW_DET}"
 
     if [[ $NONINTERACTIVE -eq 0 ]]; then
         echo "Detected configuration:"
         echo "  WireGuard interface: $WG_VAL"
         echo "  qBittorrent port: $QB_VAL"
+        echo "  NAT-PMP gateway: ${GW_VAL:-<auto/none>}"
         echo
         read -p "WireGuard interface [$WG_VAL]: " user_wg
         if [[ -n "$user_wg" ]]; then WG_VAL="$user_wg"; fi
         read -p "qBittorrent port [$QB_VAL]: " user_port
         if [[ -n "$user_port" ]]; then QB_VAL="$user_port"; fi
+        read -p "NAT-PMP gateway [$GW_VAL]: " user_gw
+        if [[ -n "$user_gw" ]]; then GW_VAL="$user_gw"; fi
     fi
 
     # Update service file with configuration
     sed -i "s/Environment=WG_INTERFACE=wg0/Environment=WG_INTERFACE=$WG_VAL/" "$SERVICE_PATH"
     sed -i "s/Environment=QB_PORT=8080/Environment=QB_PORT=$QB_VAL/" "$SERVICE_PATH"
+    if grep -q '^Environment=NATPMP_GATEWAY=' "$SERVICE_PATH"; then
+        sed -i "s|^Environment=NATPMP_GATEWAY=.*$|Environment=NATPMP_GATEWAY=${GW_VAL}|" "$SERVICE_PATH"
+    else
+        echo "Environment=NATPMP_GATEWAY=${GW_VAL}" >> "$SERVICE_PATH"
+    fi
 
     # If a wg-quick unit for this interface exists, add ordering/wants
     if systemctl list-unit-files | grep -q "wg-quick@${WG_VAL}\.service"; then
