@@ -117,14 +117,29 @@ do_install() {
     sed -i "s/Environment=WG_INTERFACE=wg0/Environment=WG_INTERFACE=$WG_VAL/" "$SERVICE_PATH"
     sed -i "s/Environment=QB_PORT=8080/Environment=QB_PORT=$QB_VAL/" "$SERVICE_PATH"
 
+    # If a wg-quick unit for this interface exists, add ordering/wants
+    if systemctl list-unit-files | grep -q "wg-quick@${WG_VAL}\.service"; then
+        sed -i "/^After=/ s/$/ wg-quick@${WG_VAL}.service/" "$SERVICE_PATH"
+        sed -i "/^Wants=/ s/$/ wg-quick@${WG_VAL}.service/" "$SERVICE_PATH"
+    fi
+
     # Make script executable
     chmod +x "$SCRIPT_DIR/port-sync.sh"
 
-    # Reload systemd and enable service
+    # Reload systemd and optionally enable service
     systemctl daemon-reload
-    systemctl enable "$SERVICE_FILE"
-
-    echo -e "${GREEN}✓ Service installed and enabled${NC}"
+    if [[ $NONINTERACTIVE -eq 1 ]]; then
+        systemctl enable "$SERVICE_FILE"
+        echo -e "${GREEN}✓ Service installed and enabled${NC}"
+    else
+        read -p "Enable service at boot? (Y/n): " enable_ans
+        if [[ -z "$enable_ans" || "$enable_ans" =~ ^[Yy]$ ]]; then
+            systemctl enable "$SERVICE_FILE"
+            echo -e "${GREEN}✓ Service installed and enabled${NC}"
+        else
+            echo -e "${YELLOW}Service installed but not enabled at boot${NC}"
+        fi
+    fi
     echo
 
     if [[ $NONINTERACTIVE -eq 1 ]]; then
@@ -135,8 +150,8 @@ do_install() {
         exit 0
     fi
 
-    read -p "Start the service now? (y/N): " start_service
-    if [[ "$start_service" =~ ^[Yy]$ ]]; then
+    read -p "Start the service now? (Y/n): " start_service
+    if [[ -z "$start_service" || "$start_service" =~ ^[Yy]$ ]]; then
         systemctl start "$SERVICE_FILE"
         echo -e "${GREEN}✓ Service started${NC}"
         sleep 2

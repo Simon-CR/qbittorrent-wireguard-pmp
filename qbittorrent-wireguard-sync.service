@@ -1,9 +1,8 @@
 [Unit]
 Description=qBittorrent WireGuard Port Sync Service
 Documentation=https://github.com/Simon-CR/qbittorrent-wireguard-pmp
-After=network.target qbittorrent.service wireguard-quick@%i.service
-Wants=network.target
-BindsTo=wireguard-quick@%i.service
+After=network-online.target qbittorrent.service
+Wants=network-online.target
 
 [Service]
 Type=simple
