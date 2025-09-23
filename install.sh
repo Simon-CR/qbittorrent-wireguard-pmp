@@ -92,22 +92,168 @@ else
     fi
 fi
 
+# Function to check if qBittorrent is running
+check_qbittorrent_running() {
+    # Check if qbittorrent process is running
+    if pgrep -f qbittorrent >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# Function to detect qBittorrent Web UI port from config
+detect_qbittorrent_port() {
+    local config_paths=(
+        # Standard Linux locations
+        "$HOME/.config/qBittorrent/qBittorrent.conf"
+        "/root/.config/qBittorrent/qBittorrent.conf"
+        # Flatpak location
+        "$HOME/.var/app/org.qbittorrent.qBittorrent/config/qBittorrent/qBittorrent.conf"
+        # Snap location
+        "$HOME/snap/qbittorrent-arnatious/current/.config/qBittorrent/qBittorrent.conf"
+        # macOS location
+        "$HOME/.config/qBittorrent/qBittorrent.conf"
+    )
+    
+    # Method 1: Try to find from config files
+    for config_file in "${config_paths[@]}"; do
+        if [[ -f "$config_file" ]]; then
+            # Look for WebUI\Port setting
+            local port=$(grep -E "^WebUI\\\\Port=" "$config_file" 2>/dev/null | cut -d'=' -f2 | tr -d '\r\n' || echo "")
+            if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
+                echo "$port"
+                return 0
+            fi
+        fi
+    done
+    
+    # Method 2: Use netstat/ss to find qBittorrent Web UI port
+    if command -v ss >/dev/null 2>&1; then
+        # Try to find qbittorrent process listening on TCP ports
+        local ports=$(ss -tlnp 2>/dev/null | grep -i qbittorrent | grep -oE ':[0-9]+' | cut -d':' -f2 | sort -u)
+        for port in $ports; do
+            # Test if this port responds to qBittorrent API
+            if curl -s -f "http://localhost:$port/api/v2/app/version" >/dev/null 2>&1; then
+                echo "$port"
+                return 0
+            fi
+        done
+    elif command -v netstat >/dev/null 2>&1; then
+        # Fallback to netstat if ss is not available
+        local ports=$(netstat -tlnp 2>/dev/null | grep -i qbittorrent | grep -oE ':[0-9]+' | cut -d':' -f2 | sort -u)
+        for port in $ports; do
+            # Test if this port responds to qBittorrent API
+            if curl -s -f "http://localhost:$port/api/v2/app/version" >/dev/null 2>&1; then
+                echo "$port"
+                return 0
+            fi
+        done
+    fi
+    
+    # Method 3: If process detection fails, try scanning common ports
+    local common_ports=(8080 8090 8081 8888 9090)
+    for port in "${common_ports[@]}"; do
+        if curl -s -f "http://localhost:$port/api/v2/app/version" >/dev/null 2>&1; then
+            echo "$port"
+            return 0
+        fi
+    done
+    
+    # Default port if not found
+    echo "8080"
+    return 1
+}
+
 echo
 
-# Test qBittorrent connection
-echo "Checking qBittorrent Web UI..."
-QB_URL="http://localhost:8080"
+# Test qBittorrent connection with port detection
+echo "Detecting qBittorrent configuration..."
+
+# First check if qBittorrent is running
+if check_qbittorrent_running; then
+    echo -e "${GREEN}✓ qBittorrent process is running${NC}"
+else
+    echo -e "${YELLOW}⚠ qBittorrent process not detected${NC}"
+    echo "  Please ensure qBittorrent is running before continuing"
+fi
+
+DETECTED_PORT=$(detect_qbittorrent_port)
+detection_result=$?
+
+if [[ $detection_result -eq 0 ]]; then
+    # Check which method found the port
+    config_found=false
+    process_found=false
+    
+    # Check if found via config file
+    config_paths=(
+        "$HOME/.config/qBittorrent/qBittorrent.conf"
+        "/root/.config/qBittorrent/qBittorrent.conf"
+        "$HOME/.var/app/org.qbittorrent.qBittorrent/config/qBittorrent/qBittorrent.conf"
+        "$HOME/snap/qbittorrent-arnatious/current/.config/qBittorrent/qBittorrent.conf"
+        "$HOME/.config/qBittorrent/qBittorrent.conf"
+    )
+    
+    for config_file in "${config_paths[@]}"; do
+        if [[ -f "$config_file" ]] && grep -q "WebUI\\\\Port=$DETECTED_PORT" "$config_file" 2>/dev/null; then
+            config_found=true
+            echo -e "${GREEN}✓ Found qBittorrent config file with Web UI port: $DETECTED_PORT${NC}"
+            break
+        fi
+    done
+    
+    # Check if found via process detection
+    if [[ "$config_found" == "false" ]]; then
+        if command -v ss >/dev/null 2>&1; then
+            if ss -tlnp 2>/dev/null | grep -i qbittorrent | grep -q ":$DETECTED_PORT "; then
+                process_found=true
+                echo -e "${GREEN}✓ Detected qBittorrent process running on port: $DETECTED_PORT${NC}"
+            fi
+        elif command -v netstat >/dev/null 2>&1; then
+            if netstat -tlnp 2>/dev/null | grep -i qbittorrent | grep -q ":$DETECTED_PORT "; then
+                process_found=true
+                echo -e "${GREEN}✓ Detected qBittorrent process running on port: $DETECTED_PORT${NC}"
+            fi
+        fi
+    fi
+    
+    if [[ "$config_found" == "false" && "$process_found" == "false" ]]; then
+        echo -e "${GREEN}✓ Found qBittorrent Web UI responding on port: $DETECTED_PORT${NC}"
+    fi
+    
+    QB_PORT="$DETECTED_PORT"
+else
+    echo -e "${YELLOW}⚠ Could not auto-detect qBittorrent Web UI port${NC}"
+    echo "  Checked config files, running processes, and common ports"
+    QB_PORT="8080"
+fi
+
+echo "Testing qBittorrent Web UI..."
+read -p "Enter qBittorrent Web UI port [$QB_PORT]: " user_port
+if [[ -n "$user_port" ]]; then
+    QB_PORT="$user_port"
+fi
+
+QB_URL="http://localhost:$QB_PORT"
+echo "Using qBittorrent URL: $QB_URL"
 
 if curl -s -f "${QB_URL}/api/v2/app/version" >/dev/null 2>&1; then
     qb_version=$(curl -s "${QB_URL}/api/v2/app/version" 2>/dev/null || echo "unknown")
     echo -e "${GREEN}✓ qBittorrent Web UI is accessible (version: $qb_version)${NC}"
+    
+    # Update the script with the correct port if it's not 8080
+    if [[ "$QB_PORT" != "8080" ]]; then
+        echo -e "${BLUE}Updating script with qBittorrent port: $QB_PORT${NC}"
+        sed -i.bak "s/QBITTORRENT_PORT=\"8080\"/QBITTORRENT_PORT=\"$QB_PORT\"/" "$MAIN_SCRIPT"
+        echo -e "${GREEN}✓ Updated script with qBittorrent port: $QB_PORT${NC}"
+    fi
 else
     echo -e "${RED}✗ qBittorrent Web UI is not accessible at $QB_URL${NC}"
     echo
     echo "Please ensure:"
     echo "1. qBittorrent is running"
     echo "2. Web UI is enabled in Tools → Options → Web UI"
-    echo "3. Web UI port is 8080 (or update the script)"
+    echo "3. Web UI port is $QB_PORT (or try a different port above)"
     echo "4. Authentication is disabled for localhost"
     echo
     read -p "Press Enter to continue anyway, or Ctrl+C to exit and fix qBittorrent setup..."

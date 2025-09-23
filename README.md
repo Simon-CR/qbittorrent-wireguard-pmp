@@ -40,6 +40,8 @@ bash install.sh
 
 The installation script will:
 - Check all dependencies (curl, WireGuard tools)
+- **Verify qBittorrent is running** and detect the process
+- **Auto-detect qBittorrent Web UI port** from config files or by scanning running processes
 - Verify your WireGuard interface is active
 - Test qBittorrent Web UI connectivity
 - Configure the script for your setup
@@ -210,7 +212,8 @@ ERROR: qBittorrent Web UI is not accessible at http://localhost:8080
 ```
 - Ensure qBittorrent is running
 - Check Web UI is enabled in qBittorrent settings
-- Verify port 8080 is correct (or update script)
+- Try common ports: 8080, 8090, 8081, 8888, 9090
+- The installation script auto-detects the port, but you can manually specify it
 - Disable authentication for localhost
 
 **WireGuard port not detected:**
