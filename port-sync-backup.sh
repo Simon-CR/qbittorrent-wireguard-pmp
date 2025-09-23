@@ -4,22 +4,7 @@
 # Monitors WireGuard listening port and updates qBittorrent when it changes
 # Designed for Debian systems with qBittorrent Web UI and WireGuard
 
-# Check if we're running with bash, not sh
-if [ -z "$BASH_VERSION" ]; then
-    echo "Error: This script requires bash, not sh"
-    echo "Please run with: bash $0 or ./$0"
-    exit 1
-fi
-
 set -euo pipefail
-
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,25 +14,9 @@ QBITTORRENT_PORT="8080"
 QBITTORRENT_URL="http://${QBITTORRENT_HOST}:${QBITTORRENT_PORT}"
 WG_INTERFACE="wg0"  # Default WireGuard interface name
 
-# Colored logging function
+# Logging function
 log() {
-    local message="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-    echo -e "${CYAN}${message}${NC}" | tee -a "$LOG_FILE"
-}
-
-log_error() {
-    local message="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1"
-    echo -e "${RED}${message}${NC}" | tee -a "$LOG_FILE"
-}
-
-log_success() {
-    local message="[$(date '+%Y-%m-%d %H:%M:%S')] ✓ $1"
-    echo -e "${GREEN}${message}${NC}" | tee -a "$LOG_FILE"
-}
-
-log_warning() {
-    local message="[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ $1"
-    echo -e "${YELLOW}${message}${NC}" | tee -a "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
 # Get WireGuard listening port
@@ -137,6 +106,7 @@ set_qbittorrent_port() {
     fi
 }
 
+
 # Check if qBittorrent is running and accessible
 check_qbittorrent() {
     if curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" >/dev/null 2>&1; then
@@ -152,79 +122,79 @@ main() {
     
     # Check if qBittorrent is accessible
     if ! check_qbittorrent; then
-        log_error "qBittorrent Web UI is not accessible at ${QBITTORRENT_URL}"
-        log_error "Please ensure qBittorrent is running and Web UI is enabled"
+        log "ERROR: qBittorrent Web UI is not accessible at ${QBITTORRENT_URL}"
+        log "Please ensure qBittorrent is running and Web UI is enabled"
         exit 1
     fi
     
     # Get current WireGuard port
     local current_wg_port
     if ! current_wg_port=$(get_wireguard_port); then
-        log_error "Could not determine WireGuard listening port"
-        log_error "Please ensure WireGuard interface '${WG_INTERFACE}' is active"
+        log "ERROR: Could not determine WireGuard listening port"
+        log "Please ensure WireGuard interface '${WG_INTERFACE}' is active"
         exit 1
     fi
     
-    log "Current WireGuard port: ${BLUE}$current_wg_port${NC}"
+    log "Current WireGuard port: $current_wg_port"
     
     # Get current qBittorrent port
     local current_qbt_port
     current_qbt_port=$(get_qbittorrent_port)
     
     if [[ -z "$current_qbt_port" ]]; then
-        log_error "Could not determine current qBittorrent port"
+        log "ERROR: Could not determine current qBittorrent port"
         exit 1
     fi
     
-    log "Current qBittorrent port: ${BLUE}$current_qbt_port${NC}"
+    log "Current qBittorrent port: $current_qbt_port"
     
     # Compare ports and update if different
     if [[ "$current_qbt_port" != "$current_wg_port" ]]; then
-        log_warning "Port mismatch detected - updating qBittorrent from ${RED}$current_qbt_port${NC} to ${GREEN}$current_wg_port${NC}"
+        log "Port mismatch detected - updating qBittorrent from $current_qbt_port to $current_wg_port"
         
         # Update qBittorrent port
         if set_qbittorrent_port "$current_wg_port"; then
-            log_success "Updated qBittorrent port to: $current_wg_port"
+            log "Successfully updated qBittorrent port to: $current_wg_port"
             
             # Verify the change
             local verified_port
             verified_port=$(get_qbittorrent_port)
             if [[ "$verified_port" == "$current_wg_port" ]]; then
-                log_success "Port update verified: qBittorrent is now using port $verified_port"
+                log "Port update verified: qBittorrent is now using port $verified_port"
             else
-                log_warning "Port verification failed. qBittorrent reports port: $verified_port"
+                log "WARNING: Port verification failed. qBittorrent reports port: $verified_port"
             fi
         else
-            log_error "Failed to update qBittorrent port to: $current_wg_port"
+            log "ERROR: Failed to update qBittorrent port to: $current_wg_port"
             exit 1
         fi
     else
-        log_success "Ports match (${GREEN}$current_wg_port${NC}), no action needed"
+        log "Ports match ($current_wg_port), no action needed"
     fi
     
-    log_success "Port sync check completed successfully"
+    log "Port sync check completed successfully"
 }
 
 # Handle script arguments
 case "${1:-}" in
     --check)
         # Just check current status without making changes
-        echo -e "${CYAN}WireGuard port:${NC} $(get_wireguard_port || echo -e '${RED}ERROR${NC}')"
-        echo -e "${CYAN}qBittorrent port:${NC} $(get_qbittorrent_port || echo -e '${RED}ERROR${NC}')"
+        echo "WireGuard port: $(get_wireguard_port || echo 'ERROR')"
+        echo "qBittorrent port: $(get_qbittorrent_port || echo 'ERROR')"
         
         # Debug: Show raw API response
         echo ""
-        echo -e "${YELLOW}Debug information:${NC}"
-        echo -e "${CYAN}qBittorrent API test:${NC} $(curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null && echo -e "${GREEN}OK${NC}" || echo -e "${RED}FAILED${NC}")"
+        echo "Debug information:"
+        echo "qBittorrent API test: $(curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null && echo "OK" || echo "FAILED")"
         
         # Show partial preferences response for debugging
         local debug_response
         debug_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
         if [[ -n "$debug_response" ]]; then
-            echo -e "${CYAN}API response contains listen_port:${NC} $(echo "$debug_response" | grep -q "listen_port" && echo -e "${GREEN}YES${NC}" || echo -e "${RED}NO${NC}")"
-            echo -e "${CYAN}Raw listen_port line:${NC} $(echo "$debug_response" | grep -o '"listen_port"[^,}]*' || echo -e "${RED}NOT FOUND${NC}")"
+            echo "API response contains listen_port: $(echo "$debug_response" | grep -q "listen_port" && echo "YES" || echo "NO")"
+            echo "Raw listen_port line: $(echo "$debug_response" | grep -o '"listen_port"[^,}]*' || echo "NOT FOUND")"
         else
-            echo -e "${RED}No API response received${NC}"
+            echo "No API response received"
         fi
         ;;
     --force)
@@ -233,67 +203,67 @@ case "${1:-}" in
         if [[ -n "$current_port" ]]; then
             log "Force updating qBittorrent port to: $current_port"
             if set_qbittorrent_port "$current_port"; then
-                log_success "Force update completed successfully"
+                log "Force update completed successfully"
             else
-                log_error "Force update failed"
+                log "ERROR: Force update failed"
                 exit 1
             fi
         else
-            log_error "Could not determine WireGuard port for force update"
+            log "ERROR: Could not determine WireGuard port for force update"
             exit 1
         fi
         ;;
     --debug)
         # Detailed debugging information
-        echo -e "${BLUE}qBittorrent WireGuard Port Sync - Debug Mode${NC}"
+        echo "qBittorrent WireGuard Port Sync - Debug Mode"
         echo "============================================"
         echo
         
-        echo -e "${YELLOW}Configuration:${NC}"
+        echo "Configuration:"
         echo "  WireGuard interface: $WG_INTERFACE"
         echo "  qBittorrent URL: $QBITTORRENT_URL"
         echo "  Log file: $LOG_FILE"
         echo
         
-        echo -e "${YELLOW}Testing WireGuard...${NC}"
+        echo "Testing WireGuard..."
         if command -v wg >/dev/null 2>&1; then
-            echo -e "  ${GREEN}✓${NC} wg command available"
-            if wg show "$WG_INTERFACE" >/dev/null 2>&1; then
-                local wg_port=$(wg show "$WG_INTERFACE" listen-port 2>/dev/null || echo "")
-                echo -e "  ${GREEN}✓${NC} Interface $WG_INTERFACE is active"
-                echo -e "  ${GREEN}✓${NC} WireGuard port: ${BLUE}$wg_port${NC}"
+            echo "  ✓ wg command available"
+            if sudo wg show "$WG_INTERFACE" >/dev/null 2>&1; then
+                local wg_port=$(sudo wg show "$WG_INTERFACE" listen-port 2>/dev/null || echo "")
+                echo "  ✓ Interface $WG_INTERFACE is active"
+                echo "  ✓ WireGuard port: $wg_port"
             else
-                echo -e "  ${RED}✗${NC} Interface $WG_INTERFACE not found or inactive"
-                echo "  Available interfaces: $(wg show interfaces 2>/dev/null || echo 'none')"
+                echo "  ✗ Interface $WG_INTERFACE not found or inactive"
+                echo "  Available interfaces: $(sudo wg show interfaces 2>/dev/null || echo 'none')"
             fi
         else
-            echo -e "  ${RED}✗${NC} wg command not found"
+            echo "  ✗ wg command not found"
         fi
         echo
         
-        echo -e "${YELLOW}Testing qBittorrent API...${NC}"
+        echo "Testing qBittorrent API..."
         if curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" >/dev/null 2>&1; then
             local version=$(curl -s "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null || echo "unknown")
-            echo -e "  ${GREEN}✓${NC} qBittorrent API accessible"
-            echo -e "  ${GREEN}✓${NC} Version: ${BLUE}$version${NC}"
+            echo "  ✓ qBittorrent API accessible"
+            echo "  ✓ Version: $version"
             
             echo "  Testing preferences API..."
             local prefs_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
             if [[ -n "$prefs_response" ]]; then
-                echo -e "  ${GREEN}✓${NC} Preferences API working"
+                echo "  ✓ Preferences API working"
                 if echo "$prefs_response" | grep -q "listen_port"; then
-                    echo -e "  ${GREEN}✓${NC} listen_port found in response"
+                    echo "  ✓ listen_port found in response"
                     local port_line=$(echo "$prefs_response" | grep -o '"listen_port"[^,}]*')
-                    echo -e "  ${GREEN}✓${NC} Raw port data: ${BLUE}$port_line${NC}"
+                    echo "  ✓ Raw port data: $port_line"
                     local parsed_port=$(get_qbittorrent_port)
-                    echo -e "  ${GREEN}✓${NC} Parsed port: ${BLUE}'$parsed_port'${NC}"
+                    echo "  ✓ Parsed port: '$parsed_port'"
                     if [[ -z "$parsed_port" ]]; then
-                        echo -e "  ${YELLOW}⚠${NC} Port parsing failed - trying manual extraction:"
+                        echo "  ⚠ Port parsing failed - trying manual extraction:"
                         echo "    Method 1: $(echo "$prefs_response" | grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')"
                         echo "    Method 2: $(echo "$prefs_response" | sed -n 's/.*"listen_port"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p')"
                     fi
                 else
-                    echo -e "  ${RED}✗${NC} listen_port not found in preferences"
+                    echo "  ✗ listen_port not found in preferences"
                     echo "  Checking for alternative field names..."
                     if echo "$prefs_response" | grep -q '"port"'; then
                         echo "    Found 'port' field: $(echo "$prefs_response" | grep -o '"port"[^,}]*')"
@@ -301,23 +271,23 @@ case "${1:-}" in
                     echo "  Response preview: $(echo "$prefs_response" | head -c 300)..."
                 fi
             else
-                echo -e "  ${RED}✗${NC} Preferences API failed"
+                echo "  ✗ Preferences API failed"
             fi
         else
-            echo -e "  ${RED}✗${NC} qBittorrent API not accessible at $QBITTORRENT_URL"
+            echo "  ✗ qBittorrent API not accessible at $QBITTORRENT_URL"
             echo "  Check that qBittorrent is running and Web UI is enabled"
         fi
         ;;
     --help|-h)
-        echo -e "${BLUE}qBittorrent WireGuard Port Sync Script${NC}"
+        echo "qBittorrent WireGuard Port Sync Script"
         echo "Usage: $0 [--check|--force|--debug|--help]"
         echo ""
         echo "Options:"
         echo "  (no args)  Normal operation - sync ports if changed"
         echo "  --check    Display current port status without changes"
         echo "  --force    Force update qBittorrent to match WireGuard"
-        echo "  --debug    Show detailed debugging information"
         echo "  --help     Show this help message"
+        echo "  --debug    Show detailed debugging information"
         echo ""
         echo "Configuration (edit script to modify):"
         echo "  WireGuard interface: $WG_INTERFACE"
@@ -329,7 +299,7 @@ case "${1:-}" in
         main
         ;;
     *)
-        echo -e "${RED}Unknown option: $1${NC}"
+        echo "Unknown option: $1"
         echo "Use --help for usage information"
         exit 1
         ;;
