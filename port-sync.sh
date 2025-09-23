@@ -205,6 +205,77 @@ main() {
     log_success "Port sync check completed successfully"
 }
 
+# Daemon mode - continuous monitoring with event detection
+daemon_mode() {
+    log "Starting daemon mode - continuous port monitoring"
+    log "Monitoring WireGuard interface: $WG_INTERFACE"
+    log "Monitoring qBittorrent at: $QBITTORRENT_URL"
+    
+    # Initial sync
+    main
+    
+    local last_wg_port=""
+    local check_interval=30  # Check every 30 seconds (more responsive than cron)
+    local config_check_interval=300  # Check config file changes every 5 minutes
+    local last_config_check=0
+    
+    while true; do
+        current_time=$(date +%s)
+        
+        # Get current WireGuard port
+        current_wg_port=$(get_wireguard_port 2>/dev/null || echo "")
+        
+        if [[ -n "$current_wg_port" ]]; then
+            # Check if WireGuard port changed
+            if [[ "$current_wg_port" != "$last_wg_port" ]]; then
+                if [[ -n "$last_wg_port" ]]; then
+                    log_warning "WireGuard port changed from $last_wg_port to $current_wg_port"
+                fi
+                
+                # Sync ports
+                current_qbt_port=$(get_qbittorrent_port 2>/dev/null || echo "")
+                if [[ -n "$current_qbt_port" && "$current_qbt_port" != "$current_wg_port" ]]; then
+                    log_warning "Port mismatch detected - updating qBittorrent from $current_qbt_port to $current_wg_port"
+                    
+                    if set_qbittorrent_port "$current_wg_port"; then
+                        log_success "Updated qBittorrent port to: $current_wg_port"
+                        
+                        # Verify the change
+                        verified_port=$(get_qbittorrent_port)
+                        if [[ "$verified_port" == "$current_wg_port" ]]; then
+                            log_success "Port sync verified: Both services using port $verified_port"
+                        else
+                            log_warning "Port verification failed. qBittorrent reports: $verified_port"
+                        fi
+                    else
+                        log_error "Failed to update qBittorrent port to: $current_wg_port"
+                    fi
+                else
+                    log "Ports already match ($current_wg_port), no action needed"
+                fi
+                
+                last_wg_port="$current_wg_port"
+            fi
+        else
+            if [[ -n "$last_wg_port" ]]; then
+                log_warning "WireGuard interface $WG_INTERFACE appears to be down"
+                last_wg_port=""
+            fi
+        fi
+        
+        # Periodic health check (every 5 minutes)
+        if (( current_time - last_config_check > config_check_interval )); then
+            if ! check_qbittorrent; then
+                log_warning "qBittorrent Web UI is not accessible - will retry on next cycle"
+            fi
+            last_config_check=$current_time
+        fi
+        
+        # Sleep for the check interval
+        sleep $check_interval
+    done
+}
+
 # Handle script arguments
 case "${1:-}" in
     --check)
@@ -215,7 +286,7 @@ case "${1:-}" in
         # Debug: Show raw API response
         echo ""
         echo -e "${YELLOW}Debug information:${NC}"
-        echo -e "${CYAN}qBittorrent API test:${NC} $(curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null && echo -e "${GREEN}OK${NC}" || echo -e "${RED}FAILED${NC}")"
+        echo -e "${CYAN}qBittorrent API test:${NC} $(curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null && echo -e " ${GREEN}OK${NC}" || echo -e " ${RED}FAILED${NC}")"
         
         # Show partial preferences response for debugging
         debug_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
@@ -307,15 +378,20 @@ case "${1:-}" in
             echo "  Check that qBittorrent is running and Web UI is enabled"
         fi
         ;;
+    --daemon)
+        # Run in daemon mode for systemd service
+        daemon_mode
+        ;;
     --help|-h)
         echo -e "${BLUE}qBittorrent WireGuard Port Sync Script${NC}"
-        echo "Usage: $0 [--check|--force|--debug|--help]"
+        echo "Usage: $0 [--check|--force|--debug|--daemon|--help]"
         echo ""
         echo "Options:"
         echo "  (no args)  Normal operation - sync ports if changed"
         echo "  --check    Display current port status without changes"
         echo "  --force    Force update qBittorrent to match WireGuard"
         echo "  --debug    Show detailed debugging information"
+        echo "  --daemon   Run continuously as a service (for systemd)"
         echo "  --help     Show this help message"
         echo ""
         echo "Configuration (edit script to modify):"

@@ -269,17 +269,52 @@ else
     echo -e "${YELLOW}⚠ Script test had issues - check the output above${NC}"
 fi
 
+# Offer to set up cron job or systemd service
+echo -e "${BLUE}Automation Setup${NC}"
+echo "================"
+echo "Choose how you want to run the port sync:"
+echo "1. Cron job (every 5 minutes) - Simple and reliable"
+echo "2. Systemd service (continuous monitoring every 30 seconds) - More responsive"
+echo "3. Both options available - install tools for flexible switching"
+echo "4. Manual setup later"
 echo
 
-# Offer to set up cron job
-echo "Cron Job Setup"
-echo "=============="
-echo "The script should run every 5 minutes to monitor port changes."
-echo
+read -p "Choose option [1-4]: " automation_choice
 
-read -p "Would you like to add a cron job now? (y/N): " setup_cron
+setup_cron=false
+setup_service=false
 
-if [[ "$setup_cron" =~ ^[Yy]$ ]]; then
+case $automation_choice in
+    1)
+        echo "Setting up cron job only..."
+        setup_cron=true
+        ;;
+    2)
+        echo "Setting up systemd service only..."
+        setup_service=true
+        ;;
+    3)
+        echo "Setting up both options for maximum flexibility..."
+        setup_cron=true
+        setup_service=true
+        ;;
+    4)
+        echo "Skipping automation setup."
+        echo
+        echo -e "${YELLOW}Manual setup options:${NC}"
+        echo "  Cron: crontab -e, then add: */5 * * * * $MAIN_SCRIPT"
+        echo "  Service: bash $SCRIPT_DIR/service-manager.sh install"
+        ;;
+    *)
+        echo "Invalid choice, skipping automation setup."
+        ;;
+esac
+
+# Set up cron job if requested
+if [[ "$setup_cron" == "true" ]]; then
+    echo
+    echo "Setting up cron job..."
+    
     # Check if cron job already exists
     if crontab -l 2>/dev/null | grep -q "port-sync.sh"; then
         echo "⚠ A cron job for port-sync.sh already exists:"
@@ -288,11 +323,11 @@ if [[ "$setup_cron" =~ ^[Yy]$ ]]; then
         read -p "Replace existing cron job? (y/N): " replace_cron
         if [[ ! "$replace_cron" =~ ^[Yy]$ ]]; then
             echo "Skipping cron job setup."
-            setup_cron=""
+            setup_cron=false
         fi
     fi
     
-    if [[ "$setup_cron" =~ ^[Yy]$ ]]; then
+    if [[ "$setup_cron" == "true" ]]; then
         # Create temporary cron file
         temp_cron=$(mktemp)
         
@@ -313,13 +348,59 @@ if [[ "$setup_cron" =~ ^[Yy]$ ]]; then
         # Clean up
         rm -f "$temp_cron"
     fi
-else
-    echo "Skipped cron job setup."
+fi
+
+# Set up systemd service if requested
+if [[ "$setup_service" == "true" ]]; then
     echo
-    echo "To add manually later, run:"
-    echo "  crontab -e"
-    echo "And add this line:"
-    echo "  */5 * * * * $MAIN_SCRIPT >/dev/null 2>&1"
+    echo "Setting up systemd service..."
+    
+    if [[ -f "$SCRIPT_DIR/service-manager.sh" ]]; then
+        echo -e "${CYAN}Running service installer...${NC}"
+        echo "Note: This will require root privileges for systemd operations"
+        
+        if bash "$SCRIPT_DIR/service-manager.sh" install; then
+            echo "✓ Systemd service set up successfully"
+            echo "  Use 'bash $SCRIPT_DIR/service-manager.sh status' to check status"
+            echo "  Use 'bash $SCRIPT_DIR/service-manager.sh logs' to view logs"
+            echo "  Use 'bash $SCRIPT_DIR/service-manager.sh stop' to stop the service"
+        else
+            echo "✗ Failed to set up systemd service"
+            if [[ "$setup_cron" != "true" ]]; then
+                echo "Would you like to fall back to cron job setup instead?"
+                read -p "Set up cron job? (y/N): " fallback_cron
+                if [[ "$fallback_cron" =~ ^[Yy]$ ]]; then
+                    setup_cron=true
+                    # Run the cron setup section
+                    echo
+                    echo "Setting up cron job as fallback..."
+                    temp_cron=$(mktemp)
+                    crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
+                    echo "*/5 * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
+                    if crontab "$temp_cron"; then
+                        echo "✓ Cron job added successfully as fallback"
+                    fi
+                    rm -f "$temp_cron"
+                fi
+            fi
+        fi
+    else
+        echo -e "${RED}Error: service-manager.sh not found${NC}"
+        if [[ "$setup_cron" != "true" ]]; then
+            echo "Falling back to cron job setup..."
+            setup_cron=true
+            # Run the cron setup section as fallback
+            echo
+            echo "Setting up cron job as fallback..."
+            temp_cron=$(mktemp)
+            crontab -l 2>/dev/null | grep -v "port-sync.sh" > "$temp_cron" || true
+            echo "*/5 * * * * $MAIN_SCRIPT >/dev/null 2>&1" >> "$temp_cron"
+            if crontab "$temp_cron"; then
+                echo "✓ Cron job added successfully as fallback"
+            fi
+            rm -f "$temp_cron"
+        fi
+    fi
 fi
 
 echo
@@ -330,7 +411,22 @@ echo "Usage:"
 echo "  $MAIN_SCRIPT                # Normal sync operation"
 echo "  $MAIN_SCRIPT --check        # Check current status"
 echo "  $MAIN_SCRIPT --force        # Force update qBittorrent"
+echo "  $MAIN_SCRIPT --daemon       # Run as daemon service (30s intervals)"
 echo
+if [[ "$setup_service" == "true" ]]; then
+    echo "Service Management:"
+    echo "  bash $SCRIPT_DIR/service-manager.sh status   # Check service status"
+    echo "  bash $SCRIPT_DIR/service-manager.sh logs     # View service logs"
+    echo "  bash $SCRIPT_DIR/service-manager.sh stop     # Stop service"
+    echo "  bash $SCRIPT_DIR/service-manager.sh start    # Start service"
+    echo
+fi
+if [[ "$setup_cron" == "true" ]]; then
+    echo "Cron Job Management:"
+    echo "  crontab -l                  # View current cron jobs"
+    echo "  crontab -e                  # Edit cron jobs"
+    echo
+fi
 echo "Log files:"
 echo "  $SCRIPT_DIR/port-sync.log    # Activity log"
 echo

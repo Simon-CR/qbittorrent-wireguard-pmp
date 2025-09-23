@@ -45,7 +45,11 @@ The installation script will:
 - Verify your WireGuard interface is active
 - Test qBittorrent Web UI connectivity
 - Configure the script for your setup
-- Optionally set up the cron job automatically
+- Offer deployment options:
+  - **Cron job** (every 5 minutes) - Simple and reliable
+  - **Systemd service** (continuous monitoring every 30 seconds) - More responsive
+  - **Both options** - Install tools for flexible switching
+  - **Manual setup** - Skip automation for custom setup
 
 ### Option 2: Manual Setup
 
@@ -59,6 +63,50 @@ chmod +x port-sync.sh
 
 # Test the script
 ./port-sync.sh --check
+```
+
+## Deployment Options
+
+After installation, you have several options for running the script:
+
+### Option A: Cron Job (Recommended for most users)
+- Runs automatically every 5 minutes
+- Simple, reliable, low resource usage
+- Set up during installation or manually:
+
+```bash
+crontab -e
+# Add this line:
+*/5 * * * * /path/to/port-sync.sh >/dev/null 2>&1
+```
+
+### Option B: Systemd Service (Advanced users)
+- Continuous monitoring with 30-second intervals
+- More responsive to port changes
+- Includes proper logging and service management
+- Set up using the service manager:
+
+```bash
+# Install and start the service
+./service-manager.sh install
+
+# Manage the service
+./service-manager.sh status    # Check status
+./service-manager.sh logs      # View logs
+./service-manager.sh stop      # Stop service
+./service-manager.sh start     # Start service
+./service-manager.sh restart   # Restart service
+./service-manager.sh uninstall # Remove service
+```
+
+### Option C: Manual Operation
+Run the script directly when needed:
+
+```bash
+./port-sync.sh           # Normal sync
+./port-sync.sh --check   # Check status only
+./port-sync.sh --force   # Force update qBittorrent
+./port-sync.sh --daemon  # Run as daemon (30s intervals)
 ```
 
 ### 2. Configure qBittorrent Web UI (if using manual setup)
@@ -99,16 +147,23 @@ WG_INTERFACE="wg0"  # Change to your interface name (e.g., "wg-vpn")
 ./port-sync.sh --force
 ```
 
-### 5. Setup Cron Job (if not done automatically)
+### 5. Alternative Setup (if not using installer)
 
-If you didn't use the installation script or chose not to set up cron automatically, add the script to your crontab to run every 5 minutes:
+If you didn't use the installation script, you can set up automation manually:
 
+**For Cron Job:**
 ```bash
 # Edit your crontab
 crontab -e
 
 # Add this line (adjust path as needed):
 */5 * * * * /home/yourusername/qbittorrent-wireguard-pmp/port-sync.sh >/dev/null 2>&1
+```
+
+**For Systemd Service:**
+```bash
+# Use the service manager
+./service-manager.sh install
 ```
 
 Or with logging to see cron output:
@@ -129,6 +184,9 @@ Or with logging to see cron output:
 
 # Force update qBittorrent to match WireGuard
 ./port-sync.sh --force
+
+# Run as daemon (continuous monitoring every 30 seconds)
+./port-sync.sh --daemon
 
 # Show detailed debugging information
 ./port-sync.sh --debug
