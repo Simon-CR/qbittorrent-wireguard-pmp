@@ -1,8 +1,30 @@
 #!/bin/bash
 
-# Quick instal# Get script directory
+# Quick installation script for qBittorrent WireGuard Port Sync
+
+# ----------------------------------------------------------------------------
+# Early constants and defaults (must be set before any use)
+# ----------------------------------------------------------------------------
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Script paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAIN_SCRIPT="$SCRIPT_DIR/port-sync.sh"
+
+# Repo metadata
+GITHUB_RAW_URL="https://raw.githubusercontent.com/Simon-CR/qbittorrent-wireguard-pmp/main"
+# Derive version from git if possible, else fallback
+SCRIPT_VERSION="${SCRIPT_VERSION:-$(git -C "$SCRIPT_DIR" describe --tags --always 2>/dev/null || git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "dev")}"
+
+# Deployment flags safe defaults
+setup_cron=false
+setup_service=false
 
 # Help function
 show_help() {
@@ -393,6 +415,8 @@ esac
 # Installation script for qBittorrent WireGuard Port Sync
 # This script helps set up the port sync script and cron job
 
+:
+
 # Check if we're running with bash, not sh
 if [ -z "$BASH_VERSION" ]; then
     echo "Error: This script requires bash, not sh"
@@ -555,8 +579,6 @@ detect_qbittorrent_port() {
         "$HOME/.var/app/org.qbittorrent.qBittorrent/config/qBittorrent/qBittorrent.conf"
         # Snap location
         "$HOME/snap/qbittorrent-arnatious/current/.config/qBittorrent/qBittorrent.conf"
-        # macOS location
-        "$HOME/.config/qBittorrent/qBittorrent.conf"
     )
     
     # Method 1: Try to find from config files
