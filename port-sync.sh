@@ -61,7 +61,7 @@ debug() {
 }
 
 
-"# Get external port by requesting/refreshing NAT-PMP mapping (ProtonVPN)"
+# Get external port by requesting/refreshing NAT-PMP mapping (ProtonVPN)
 get_protonvpn_port() {
     if ! command -v natpmpc >/dev/null 2>&1; then
         log_warning "natpmpc not found, attempting to install..."
