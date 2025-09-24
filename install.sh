@@ -498,8 +498,7 @@ if [[ -d .git ]] && command -v git >/dev/null 2>&1; then
     fi
 else
     if command -v curl >/dev/null 2>&1; then
-        local tmp_remote_install
-        tmp_remote_install=$(mktemp) || true
+    tmp_remote_install=$(mktemp) || tmp_remote_install=""
         if [[ -n "$tmp_remote_install" ]] && curl -fsSL -o "$tmp_remote_install" "$GITHUB_RAW_URL/install.sh"; then
             if [[ ! -f "$SCRIPT_DIR/install.sh" ]] || ! cmp -s "$SCRIPT_DIR/install.sh" "$tmp_remote_install"; then
                 echo -e "${YELLOW}⚠ Updates available!${NC}"
@@ -518,8 +517,12 @@ else
                 echo -e "${GREEN}✓ Already up to date${NC}"
                 refresh_service_unit
             fi
+        else
+            echo -e "${RED}✗ Failed to check for updates (network/curl issue)${NC}"
         fi
-        rm -f "$tmp_remote_install" 2>/dev/null || true
+        if [[ -n "$tmp_remote_install" ]]; then
+            rm -f "$tmp_remote_install" 2>/dev/null || true
+        fi
     else
         echo -e "${YELLOW}⚠ Skipping update check (curl not available)${NC}"
     fi
