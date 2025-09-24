@@ -160,11 +160,11 @@ get_qbittorrent_use_random_port() {
         echo "unknown"
         return 0
     fi
-    if echo "$json" | grep -q '"use_random_port"[[:space:]]*:[[:space:]]*true'; then
+    if echo "$json" | grep -q '"random_port"[[:space:]]*:[[:space:]]*true'; then
         echo "true"
         return 0
     fi
-    if echo "$json" | grep -q '"use_random_port"[[:space:]]*:[[:space:]]*false'; then
+    if echo "$json" | grep -q '"random_port"[[:space:]]*:[[:space:]]*false'; then
         echo "false"
         return 0
     fi
@@ -380,7 +380,7 @@ verify_qbittorrent_port() {
 set_qbittorrent_port() {
     local new_port="$1"
     local payload
-    printf -v payload 'json={"listen_port":%s,"use_random_port":false}' "$new_port"
+    printf -v payload 'json={"listen_port":%s,"random_port":false}' "$new_port"
 
     local random_flag
     random_flag=$(get_qbittorrent_use_random_port)
@@ -460,7 +460,19 @@ main() {
                 local random_flag
                 random_flag=$(get_qbittorrent_use_random_port)
                 local reported_port="${verified_port:-$(get_qbittorrent_port 2>/dev/null || echo "<unknown>")}"
-                log_warning "Port verification failed after retries. qBittorrent reports port: $reported_port (use_random_port=$random_flag)"
+                log_warning "Port verification failed after retries. qBittorrent reports port: $reported_port (random_port=$random_flag)"
+                log_warning "Attempting to toggle random_port setting to force refresh."
+                local retry_payload
+                printf -v retry_payload 'json={"listen_port":%s,"random_port":false}' "$sync_port"
+                if qbittorrent_curl_and_log "/api/v2/app/setPreferences" -f -X POST -d 'json={"random_port":true}' >/dev/null; then
+                    sleep 1
+                    if qbittorrent_curl_and_log "/api/v2/app/setPreferences" -f -X POST -d "$retry_payload" >/dev/null; then
+                        if verified_port=$(verify_qbittorrent_port "$sync_port"); then
+                            log_success "Port update verified after random_port toggle: qBittorrent using $verified_port"
+                            return 0
+                        fi
+                    fi
+                fi
                 log_warning "qBittorrent may require a manual restart or setting QBITTORRENT_RESTART_COMMAND."
                 return 1
             fi
@@ -526,7 +538,20 @@ daemon_mode() {
                             local random_flag
                             random_flag=$(get_qbittorrent_use_random_port)
                             local reported_port="${verified_port:-$(get_qbittorrent_port 2>/dev/null || echo "<unknown>")}"
-                            log_warning "[Loop] Port verification failed after retries. qBittorrent reports: $reported_port (use_random_port=$random_flag)"
+                            log_warning "[Loop] Port verification failed after retries. qBittorrent reports: $reported_port (random_port=$random_flag)"
+                            log_warning "[Loop] Attempting to toggle random_port setting to force refresh."
+                            local retry_payload
+                            printf -v retry_payload 'json={"listen_port":%s,"random_port":false}' "$current_port"
+                            if qbittorrent_curl_and_log "/api/v2/app/setPreferences" -f -X POST -d 'json={"random_port":true}' >/dev/null; then
+                                sleep 1
+                                if qbittorrent_curl_and_log "/api/v2/app/setPreferences" -f -X POST -d "$retry_payload" >/dev/null; then
+                                    if verified_port=$(verify_qbittorrent_port "$current_port"); then
+                                        log_success "[Loop] Port sync verified after random_port toggle: Both services using $verified_port"
+                                        last_port="$current_port"
+                                        continue
+                                    fi
+                                fi
+                            fi
                             if [[ -z "$QBITTORRENT_RESTART_COMMAND" ]]; then
                                 log_warning "[Loop] Configure QBITTORRENT_RESTART_COMMAND to restart qBittorrent automatically if settings do not apply."
                             fi
