@@ -15,8 +15,9 @@ A bash script that automatically monitors your WireGuard listening port and upda
 ## Features
 
 - 🔄 Automatically detects WireGuard port changes
-- 📡 Updates qBittorrent via Web API (localhost, no auth required)
+- 📡 Updates qBittorrent via Web API with optional credentials
 - 📝 Comprehensive logging for debugging
+- 🔁 Optional auto-restart of qBittorrent to apply new ports
 - 🔧 Multiple methods to detect WireGuard port
 - ⚙️ Ready-to-run systemd service that maintains ProtonVPN NAT-PMP leases
 - 🛡️ Error handling and validation
@@ -27,7 +28,7 @@ A bash script that automatically monitors your WireGuard listening port and upda
 - Debian/Ubuntu Linux (or similar)
 - **Bash shell** (not sh - scripts use bash-specific features)
 - WireGuard installed and configured
-- qBittorrent with Web UI enabled (no authentication)
+- qBittorrent with Web UI enabled (supply credentials via env if required)
 - `curl` command available
 - Bash 4.0+ (standard on modern systems)
 
@@ -108,22 +109,18 @@ Ensure qBittorrent Web UI is enabled and accessible:
 2. Go to **Tools** → **Options** → **Web UI**
 3. Enable **Web User Interface (Remote control)**
 4. Set **Port** to `8080` (or edit script if different)
-5. **Disable authentication** or set to **Bypass authentication for clients on localhost**
+5. **Disable authentication** or set to **Bypass authentication for clients on localhost** (alternatively, set `QBITTORRENT_USERNAME`/`QBITTORRENT_PASSWORD` when running the script)
 6. Click **OK** and restart qBittorrent
 
 ### 3. Configure WireGuard Interface (if needed)
 
-If your WireGuard interface is not `wg0`, you may need to edit the script:
+If your WireGuard interface is not `wg0`, export `WG_INTERFACE` before running the script or add it to the service environment:
 
 ```bash
-# Edit the script to match your interface name
-nano port-sync.sh
-
-# Change this line if needed:
-WG_INTERFACE="wg0"  # Change to your interface name (e.g., "wg-vpn")
+WG_INTERFACE="wg-vpn" ./port-sync.sh --check
 ```
 
-**Note:** The installation script will help you configure this automatically.
+**Note:** The installation script will prompt for your interface and write the value to the service configuration automatically.
 
 ### 4. Test the Script
 
@@ -186,15 +183,15 @@ DEBUG=1 ./port-sync.sh --check
 DEBUG=1 ./port-sync.sh --daemon
 ```
 
+- Adjust debug payload length with `DEBUG_PAYLOAD_PREVIEW` if large responses are being truncated.
+
 - For service logs:
 
 ```bash
 journalctl -u qbittorrent-wireguard-sync -f
 ```
 
-- qBittorrent API target can be customized via env vars:
-   - `QBITTORRENT_HOST` (default `localhost`)
-   - `QBITTORRENT_PORT` or `QB_PORT` (default `8080`)
+- See the [Configuration](#configuration) section for the complete list of environment overrides (`QBITTORRENT_*`, `WG_INTERFACE`, `NATPMP_GATEWAY`, etc.).
 ```
 
 ### Output Examples
@@ -220,19 +217,37 @@ qBittorrent port: 51820
 
 ## Configuration
 
-Edit the script to customize these settings:
+Most behavior is controlled through environment variables. Defaults are shown below:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `WG_INTERFACE` | `wg0` | WireGuard interface to monitor |
+| `QBITTORRENT_HOST` | `localhost` | qBittorrent Web UI hostname or IP |
+| `QBITTORRENT_PORT` / `QB_PORT` | `8080` | qBittorrent Web UI port |
+| `QBITTORRENT_USERNAME` / `QB_USERNAME` | _(empty)_ | Optional Web UI username |
+| `QBITTORRENT_PASSWORD` / `QB_PASSWORD` | _(empty)_ | Optional Web UI password |
+| `QBITTORRENT_RESTART_COMMAND` / `QBT_RESTART_COMMAND` | _(empty)_ | Command to restart qBittorrent after updates |
+| `QBITTORRENT_RESTART_WAIT` | `5` | Seconds to wait after restart before verification |
+| `NATPMP_GATEWAY` | _(auto-detect)_ | Override ProtonVPN NAT-PMP gateway IP |
+| `DEBUG` | `0` | Enable extra logging when set to `1` |
+| `DEBUG_PAYLOAD_PREVIEW` | `512` | Max characters printed for debug payloads |
+| `PORT_SYNC_TMPDIR` | `./tmp` | Directory for temporary curl files |
+
+### Examples
 
 ```bash
-# qBittorrent Web UI settings
-QBITTORRENT_HOST="localhost"
-QBITTORRENT_PORT="8080"
+# Run once with explicit restart command and debug logging
+QBITTORRENT_RESTART_COMMAND="systemctl restart qbittorrent-nox" \
+DEBUG=1 ./port-sync.sh --force
 
-# WireGuard interface name
-WG_INTERFACE="wg0"
-
-# File locations (automatically set to script directory)
-LOG_FILE="${SCRIPT_DIR}/port-sync.log"
+# Override NAT-PMP gateway and credentials when starting the daemon
+NATPMP_GATEWAY=10.2.0.1 \
+QBITTORRENT_USERNAME=admin \
+QBITTORRENT_PASSWORD=secret \
+./port-sync.sh --daemon
 ```
+
+When using the systemd unit, export these variables in `/etc/default/qbittorrent-wireguard-sync` (created by the installer) or edit the unit file to set `Environment=` entries.
 
 ## How It Works
 
