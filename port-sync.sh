@@ -158,7 +158,7 @@ get_qbittorrent_use_random_port() {
     local json="${1:-$QBITTORRENT_LAST_PREFS}"
     if [[ -z "$json" ]]; then
         echo "unknown"
-        return 1
+        return 0
     fi
     if echo "$json" | grep -q '"use_random_port"[[:space:]]*:[[:space:]]*true'; then
         echo "true"
@@ -169,7 +169,7 @@ get_qbittorrent_use_random_port() {
         return 0
     fi
     echo "unknown"
-    return 1
+    return 0
 }
 
 
@@ -459,7 +459,9 @@ main() {
             else
                 local random_flag
                 random_flag=$(get_qbittorrent_use_random_port)
-                log_warning "Port verification failed after retries. qBittorrent reports port: $verified_port (use_random_port=$random_flag)"
+                local reported_port="${verified_port:-$(get_qbittorrent_port 2>/dev/null || echo "<unknown>")}"
+                log_warning "Port verification failed after retries. qBittorrent reports port: $reported_port (use_random_port=$random_flag)"
+                log_warning "qBittorrent may require a manual restart or setting QBITTORRENT_RESTART_COMMAND."
                 return 1
             fi
         else
@@ -523,7 +525,11 @@ daemon_mode() {
                         else
                             local random_flag
                             random_flag=$(get_qbittorrent_use_random_port)
-                            log_warning "[Loop] Port verification failed after retries. qBittorrent reports: $verified_port (use_random_port=$random_flag)"
+                            local reported_port="${verified_port:-$(get_qbittorrent_port 2>/dev/null || echo "<unknown>")}"
+                            log_warning "[Loop] Port verification failed after retries. qBittorrent reports: $reported_port (use_random_port=$random_flag)"
+                            if [[ -z "$QBITTORRENT_RESTART_COMMAND" ]]; then
+                                log_warning "[Loop] Configure QBITTORRENT_RESTART_COMMAND to restart qBittorrent automatically if settings do not apply."
+                            fi
                         fi
                     else
                         log_error "[Loop] Failed to update qBittorrent port to: $current_port"
