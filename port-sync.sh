@@ -25,6 +25,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SCRIPT_DIR}/port-sync.log"
 DEBUG="${DEBUG:-0}"
+DEBUG_PAYLOAD_PREVIEW="${DEBUG_PAYLOAD_PREVIEW:-512}"
 QBITTORRENT_HOST="${QBITTORRENT_HOST:-localhost}"
 # Allow service env var QB_PORT or QBITTORRENT_PORT to override default 8080
 QBITTORRENT_PORT="${QBITTORRENT_PORT:-${QB_PORT:-8080}}"
@@ -91,6 +92,45 @@ debug() {
     fi
 }
 
+debug_payload() {
+    if [[ "$DEBUG" != "1" ]]; then
+        return
+    fi
+
+    local label="$1"
+    local data="${2:-}"
+    local max_len="$DEBUG_PAYLOAD_PREVIEW"
+    local flattened="${data//$'\n'/ | }"
+    local length=${#flattened}
+
+    if (( length <= max_len )); then
+        debug "$label: $flattened"
+    else
+        debug "$label: ${flattened:0:max_len}... (truncated, total ${length} chars)"
+    fi
+}
+
+# Extract a numeric value from a simple JSON blob without jq.
+extract_json_number() {
+    local json="$1"
+    local key="$2"
+
+    if [[ -z "$json" || -z "$key" ]]; then
+        return 1
+    fi
+
+    local value
+    value=$(echo "$json" | grep -oE "\"${key}\"[[:space:]]*:[[:space:]]*[0-9]+" | grep -oE '[0-9]+$' | head -1)
+
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "$value"
+        return 0
+    fi
+
+    return 1
+}
+
+# Authenticate against the qBittorrent WebUI when credentials are provided.
 qbittorrent_login() {
     if [[ -n "$QBITTORRENT_USERNAME" && -n "$QBITTORRENT_PASSWORD" ]]; then
         debug "Logging into qBittorrent WebUI"
@@ -110,6 +150,7 @@ qbittorrent_login() {
     return 0
 }
 
+# Perform an authenticated curl request against the qBittorrent API.
 qbittorrent_curl() {
     local endpoint="$1"
     shift
@@ -128,6 +169,7 @@ qbittorrent_curl() {
         "$url"
 }
 
+# Perform a qBittorrent API call with error handling and optional logging.
 qbittorrent_curl_and_log() {
     local endpoint="$1"
     shift
@@ -150,12 +192,12 @@ qbittorrent_curl_and_log() {
         return 1
     fi
 
-    debug "Response from $endpoint: $response"
+    debug_payload "Response from $endpoint" "$response"
     echo "$response"
     return 0
 }
 
-
+# Restart qBittorrent and block until the WebUI becomes reachable again.
 restart_qbittorrent_service() {
     if [[ -n "$QBITTORRENT_RESTART_COMMAND" ]]; then
         log "Restarting qBittorrent using configured command"
@@ -194,7 +236,7 @@ restart_qbittorrent_service() {
 }
 
 
-# Get external port by requesting/refreshing NAT-PMP mapping (ProtonVPN)
+# Refresh the NAT-PMP mapping and return the ProtonVPN forwarded port.
 get_protonvpn_port() {
     if ! command -v natpmpc >/dev/null 2>&1; then
         log_warning "natpmpc not found, attempting to install..."
@@ -233,10 +275,10 @@ get_protonvpn_port() {
     local out_udp out_tcp port_udp port_tcp rc
     out_udp=$(natpmpc "${gw_args[@]}" -a 1 0 udp 60 2>&1) || rc=$?
     rc=${rc:-0}
-    debug "natpmpc -a udp exit=$rc output: ${out_udp//$'\n'/ | }"
+    debug_payload "natpmpc -a udp exit=$rc" "$out_udp"
     out_tcp=$(natpmpc "${gw_args[@]}" -a 1 0 tcp 60 2>&1) || rc=$?
     rc=${rc:-0}
-    debug "natpmpc -a tcp exit=$rc output: ${out_tcp//$'\n'/ | }"
+    debug_payload "natpmpc -a tcp exit=$rc" "$out_tcp"
 
     # Extract mapped public port
     port_udp=$(echo "$out_udp" | grep -Eo 'Mapped public port[^0-9]*[0-9]+' | grep -Eo '[0-9]+' | head -1)
@@ -262,7 +304,7 @@ get_protonvpn_port() {
     return 1
 }
 
-# Get WireGuard listening port (legacy/fallback)
+# Fallback helper for reading the WireGuard listen port directly.
 get_wireguard_port() {
     local port
     # Method 1: Try to get from wg command
@@ -292,66 +334,55 @@ get_wireguard_port() {
     return 1
 }
 
-# Get current qBittorrent port
+# Get the currently configured qBittorrent port from preferences.
 get_qbittorrent_port() {
-    local response
+    local response port
 
-    if ! response=$(qbittorrent_curl_and_log "/api/v2/app/preferences" -f); then
-        response=""
-    fi
-
+    response=$(qbittorrent_curl_and_log "/api/v2/app/preferences" -f || echo "")
     QBITTORRENT_LAST_PREFS="$response"
 
-    if [[ -n "$response" ]]; then
-        # Extract listen_port from JSON response - use multiple approaches
-        local port
-
-        # Method 1: Simple grep for the port number after listen_port
-        port=$(echo "$response" | grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
-
-        # Method 2: Use sed as fallback
-        if [[ -z "$port" ]]; then
-            port=$(echo "$response" | sed -n 's/.*"listen_port"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p')
-        fi
-
-        # Method 3: Try alternative field names that qBittorrent might use
-        if [[ -z "$port" ]]; then
-            port=$(echo "$response" | grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
-        fi
-
-        if [[ "$port" =~ ^[0-9]+$ ]]; then
-            echo "$port"
-        else
-            if echo "$response" | grep -q '"listen_port"'; then
-                log_warning "Unable to parse listen_port from qBittorrent preferences response"
-            fi
-            echo ""
-        fi
-    else
+    if [[ -z "$response" ]]; then
         echo ""
+        return 0
     fi
+
+    if port=$(extract_json_number "$response" "listen_port"); then
+        echo "$port"
+        return 0
+    fi
+
+    if port=$(extract_json_number "$response" "port"); then
+        echo "$port"
+        return 0
+    fi
+
+    if echo "$response" | grep -q '"listen_port"'; then
+        log_warning "Unable to parse listen_port from qBittorrent preferences response"
+    fi
+
+    echo ""
 }
 
+# Query qBittorrent runtime data to obtain the active listen port.
 get_qbittorrent_runtime_port() {
     local response port
 
-    if ! response=$(qbittorrent_curl_and_log "/api/v2/sync/maindata" -f); then
-        response=""
-    fi
-
+    response=$(qbittorrent_curl_and_log "/api/v2/sync/maindata" -f || echo "")
     QBITTORRENT_LAST_MAINDATA="$response"
 
-    if [[ -n "$response" ]]; then
-        port=$(echo "$response" | grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
-        if [[ "$port" =~ ^[0-9]+$ ]]; then
-            echo "$port"
-            return 0
-        fi
+    if [[ -z "$response" ]]; then
+        return 1
+    fi
+
+    if port=$(extract_json_number "$response" "listen_port"); then
+        echo "$port"
+        return 0
     fi
 
     return 1
 }
 
+# Poll qBittorrent until the expected port appears or retries are exhausted.
 verify_qbittorrent_port() {
     local expected="$1"
     local attempts="${2:-8}"  # Increased attempts
@@ -395,7 +426,7 @@ verify_qbittorrent_port() {
     return 1
 }
 
-# Set qBittorrent port
+# Update qBittorrent's listen port via the WebUI API and restart if needed.
 set_qbittorrent_port() {
     local new_port="$1"
     local payload="json={\"listen_port\":${new_port}}"
@@ -409,7 +440,12 @@ set_qbittorrent_port() {
 
     local prefs_response
     if prefs_response=$(qbittorrent_curl_and_log "/api/v2/app/preferences" -f); then
-        log "Preferences after port update: $(echo "$prefs_response" | grep -o '"listen_port"[^,}]*')"
+        local updated_port
+        if updated_port=$(extract_json_number "$prefs_response" "listen_port"); then
+            log "Preferences after port update: \"listen_port\":$updated_port"
+        else
+            log "Preferences after port update: $(echo "$prefs_response" | grep -o '"listen_port"[^,}]*')"
+        fi
     else
         log_warning "Unable to fetch preferences after port update"
     fi
@@ -417,7 +453,7 @@ set_qbittorrent_port() {
     return 0
 }
 
-# Check if qBittorrent is running and accessible
+# Quick health check for the qBittorrent WebUI API.
 check_qbittorrent() {
     if qbittorrent_curl "/api/v2/app/version" -f >/dev/null 2>&1; then
         return 0
@@ -426,7 +462,7 @@ check_qbittorrent() {
     fi
 }
 
-# Main execution
+# Single-run sync entry point.
 main() {
     log "Starting port sync check..."
     
@@ -485,7 +521,7 @@ main() {
     log_success "Port sync check completed successfully"
 }
 
-# Daemon mode - continuous monitoring with event detection
+# Continuous monitoring loop intended for systemd service usage.
 daemon_mode() {
     log "Starting daemon mode - continuous port monitoring"
     log "Monitoring VPN interface: $WG_INTERFACE"
@@ -687,10 +723,17 @@ case "${1:-}" in
         echo "  --daemon   Run continuously as a service (for systemd)"
         echo "  --help     Show this help message"
         echo ""
-        echo "Configuration (edit script to modify):"
-        echo "  WireGuard interface: $WG_INTERFACE"
-        echo "  qBittorrent URL: $QBITTORRENT_URL"
-        echo "  Log file: $LOG_FILE"
+        echo "Configuration variables (override via environment):"
+        echo "  WG_INTERFACE              WireGuard interface (default: wg0)"
+        echo "  QBITTORRENT_HOST/PORT     WebUI address (default: localhost:8080)"
+        echo "  QBITTORRENT_USERNAME/PASSWORD  Optional WebUI credentials"
+        echo "  QBITTORRENT_RESTART_COMMAND    Restart command for qBittorrent"
+        echo "  QBITTORRENT_RESTART_WAIT       Seconds to wait after restart (default: $QBITTORRENT_RESTART_WAIT)"
+        echo "  NATPMP_GATEWAY             Override detected NAT-PMP gateway"
+        echo "  DEBUG=1                    Enable debug logging"
+        echo "  DEBUG_PAYLOAD_PREVIEW      Max debug payload length (default: $DEBUG_PAYLOAD_PREVIEW)"
+        echo ""
+        echo "Log file location: $LOG_FILE"
         ;;
     "")
         # Normal operation
