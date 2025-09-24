@@ -176,6 +176,7 @@ refresh_service_unit() {
         fi
         rm -f "$_out"
     fi
+    return 0
 }
 
 # Prompt helper: confirm with default

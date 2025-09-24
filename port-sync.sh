@@ -32,7 +32,23 @@ QBITTORRENT_URL="http://${QBITTORRENT_HOST}:${QBITTORRENT_PORT}"
 QBITTORRENT_RESTART_COMMAND="${QBITTORRENT_RESTART_COMMAND:-${QBT_RESTART_COMMAND:-}}"
 QBITTORRENT_USERNAME="${QBITTORRENT_USERNAME:-${QB_USERNAME:-}}"
 QBITTORRENT_PASSWORD="${QBITTORRENT_PASSWORD:-${QB_PASSWORD:-}}"
-QBITTORRENT_COOKIE_JAR="$(mktemp -t qbittorrent_cookie_XXXXXX)"
+PORT_SYNC_TMPDIR_DEFAULT="${PORT_SYNC_TMPDIR:-${TMPDIR:-${SCRIPT_DIR}/tmp}}"
+PORT_SYNC_TMPDIR="${PORT_SYNC_TMPDIR_DEFAULT%/}"
+
+if [[ ! -d "$PORT_SYNC_TMPDIR" ]]; then
+    if ! mkdir -p "$PORT_SYNC_TMPDIR"; then
+        echo "Error: Unable to create temporary directory at $PORT_SYNC_TMPDIR" >&2
+        exit 1
+    fi
+fi
+
+chmod 700 "$PORT_SYNC_TMPDIR" 2>/dev/null || true
+export TMPDIR="$PORT_SYNC_TMPDIR"
+
+if ! QBITTORRENT_COOKIE_JAR="$(mktemp "${TMPDIR}/qbittorrent_cookie_XXXXXX")"; then
+    echo "Error: Unable to create temporary cookie jar" >&2
+    exit 1
+fi
 QBITTORRENT_LAST_PREFS=""
 QBITTORRENT_LAST_MAINDATA=""
 WG_INTERFACE="${WG_INTERFACE:-wg0}"  # Default WireGuard interface name
@@ -116,7 +132,10 @@ qbittorrent_curl_and_log() {
     shift
 
     local err_file
-    err_file=$(mktemp -t qbittorrent_curl_err_XXXXXX)
+    if ! err_file="$(mktemp "${TMPDIR}/qbittorrent_curl_err_XXXXXX")"; then
+        log_error "Failed to create temporary file for curl stderr"
+        return 1
+    fi
 
     local response
     response=$(qbittorrent_curl "$endpoint" "$@" 2>"$err_file")
