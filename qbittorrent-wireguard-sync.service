@@ -1,4 +1,6 @@
 [Unit]
+# Template schema version - increment when service structure changes
+X-Version=3
 Description=qBittorrent WireGuard Port Sync Service
 Documentation=https://github.com/Simon-CR/qbittorrent-wireguard-pmp
 After=network-online.target qbittorrent.service

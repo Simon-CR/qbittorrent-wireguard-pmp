@@ -123,9 +123,20 @@ refresh_service_unit() {
         return 0
     fi
 
-    if [[ ! "$template_path" -nt "$svc_path" ]]; then
-        echo -e "${GREEN}✓ Service unit already matches current template${NC}"
-        return 0
+    local template_version installed_version
+    template_version=$(grep -E '^X-Version=' "$template_path" | head -1 | cut -d'=' -f2)
+    installed_version=$(grep -E '^X-Version=' "$svc_path" 2>/dev/null | head -1 | cut -d'=' -f2)
+
+    if [[ -n "$template_version" && -n "$installed_version" ]]; then
+        if [[ "$template_version" == "$installed_version" ]]; then
+            echo -e "${GREEN}✓ Service unit already matches current template (version $template_version)${NC}"
+            return 0
+        fi
+    else
+        if [[ ! "$template_path" -nt "$svc_path" ]]; then
+            echo -e "${GREEN}✓ Service unit already matches current template${NC}"
+            return 0
+        fi
     fi
 
     echo -e "${BLUE}Refreshing installed systemd service unit${NC}"
