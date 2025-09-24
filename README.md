@@ -10,15 +10,15 @@ ProtonVPN's port forwarding requires a persistent loop to keep the port open. If
 
 # qBittorrent WireGuard Port Sync
 
-A bash script that automatically monitors your WireGuard listening port and updates qBittorrent's port mapping when it changes. Perfect for VPN setups with dynamic NAT port forwarding.
+A bash script that continuously refreshes the ProtonVPN NAT-PMP forwarded port and keeps qBittorrent's listening port in sync. Perfect for VPN setups with dynamic port forwarding over WireGuard.
 
 ## Features
 
-- 🔄 Automatically detects WireGuard port changes
+- 🔄 Automatically refreshes ProtonVPN NAT-PMP mappings and syncs qBittorrent
 - 📡 Updates qBittorrent via Web API with optional credentials
 - 📝 Comprehensive logging for debugging
 - 🔁 Optional auto-restart of qBittorrent to apply new ports
-- 🔧 Multiple methods to detect WireGuard port
+- 🔧 Includes WireGuard port detection as a fallback for manual force operations
 - ⚙️ Ready-to-run systemd service that maintains ProtonVPN NAT-PMP leases
 - 🛡️ Error handling and validation
 - 🔍 Status checking and manual override options
@@ -27,7 +27,7 @@ A bash script that automatically monitors your WireGuard listening port and upda
 
 - Debian/Ubuntu Linux (or similar)
 - **Bash shell** (not sh - scripts use bash-specific features)
-- WireGuard installed and configured
+- ProtonVPN WireGuard connection active (WireGuard tools installed)
 - qBittorrent with Web UI enabled (supply credentials via env if required)
 - `curl` command available
 - Bash 4.0+ (standard on modern systems)
@@ -97,7 +97,7 @@ Run the script directly if you prefer to supervise it yourself:
 ```bash
 ./port-sync.sh           # Normal sync
 ./port-sync.sh --check   # Check status only
-./port-sync.sh --force   # Force update qBittorrent
+./port-sync.sh --force   # Force qBittorrent to match the WireGuard listen port (fallback)
 ./port-sync.sh --daemon  # Run as daemon (~45s intervals)
 ```
 
@@ -112,9 +112,9 @@ Ensure qBittorrent Web UI is enabled and accessible:
 5. **Disable authentication** or set to **Bypass authentication for clients on localhost** (alternatively, set `QBITTORRENT_USERNAME`/`QBITTORRENT_PASSWORD` when running the script)
 6. Click **OK** and restart qBittorrent
 
-### 3. Configure WireGuard Interface (if needed)
+### 3. Configure ProtonVPN WireGuard interface (if needed)
 
-If your WireGuard interface is not `wg0`, export `WG_INTERFACE` before running the script or add it to the service environment:
+The script uses your WireGuard interface to derive the NAT-PMP gateway. If your ProtonVPN interface is not `wg0`, export `WG_INTERFACE` before running the script or add it to the service environment:
 
 ```bash
 WG_INTERFACE="wg-vpn" ./port-sync.sh --check
@@ -132,6 +132,7 @@ WG_INTERFACE="wg-vpn" ./port-sync.sh --check
 ./port-sync.sh
 
 # Force update qBittorrent to match WireGuard
+# Force qBittorrent to match the WireGuard listen port (fallback)
 ./port-sync.sh --force
 ```
 
@@ -161,7 +162,7 @@ sudo ./service-manager.sh install
 # Check current status without making changes
 ./port-sync.sh --check
 
-# Force update qBittorrent to match WireGuard
+# Force qBittorrent to match the WireGuard listen port (fallback)
 ./port-sync.sh --force
 
 # Run as daemon (continuous monitoring ~45 seconds)
@@ -200,11 +201,12 @@ journalctl -u qbittorrent-wireguard-sync -f
 ```bash
 $ ./port-sync.sh
 [2025-09-23 10:15:30] Starting port sync check...
-[2025-09-23 10:15:30] Current WireGuard port: 51820
+[2025-09-23 10:15:30] NAT-PMP mapped public port: 35476
+[2025-09-23 10:15:30] Detected ProtonVPN NAT-PMP port: 35476
 [2025-09-23 10:15:30] Current qBittorrent port: 48392
-[2025-09-23 10:15:30] Port mismatch detected - updating qBittorrent from 48392 to 51820
-[2025-09-23 10:15:30] Successfully updated qBittorrent port to: 51820
-[2025-09-23 10:15:31] Port update verified: qBittorrent is now using port 51820
+[2025-09-23 10:15:30] Port mismatch detected - updating qBittorrent from 48392 to 35476
+[2025-09-23 10:15:31] Updated qBittorrent port to: 35476
+[2025-09-23 10:15:32] Port update verified: qBittorrent is now using port 35476
 [2025-09-23 10:15:31] Port sync check completed successfully
 ```
 
@@ -212,8 +214,10 @@ $ ./port-sync.sh
 ```bash
 $ ./port-sync.sh --check
 WireGuard port: 51820
-qBittorrent port: 51820
+qBittorrent port: 35476
 ```
+
+> The `--check` output still shows the WireGuard listen port for diagnostics, but the NAT-PMP forwarded port is the authoritative value used for syncing.
 
 ## Configuration
 
@@ -251,20 +255,17 @@ When using the systemd unit, export these variables in `/etc/default/qbittorrent
 
 ## How It Works
 
-1. **Port Detection**: The script uses multiple methods to detect your WireGuard listening port:
-   - `wg show` command (primary method)
-   - Parse WireGuard config file (fallback)
-   - Network socket analysis (last resort)
+1. **NAT-PMP Mapping**: Every loop, the script calls `natpmpc` to refresh the ProtonVPN NAT-PMP lease and capture the currently forwarded port (deriving the gateway from the WireGuard interface when needed).
 
-2. **Port Comparison**: Gets the current qBittorrent listening port via Web API and compares it with the WireGuard port
+2. **Port Comparison**: Retrieves qBittorrent preferences via the Web API and compares the configured `listen_port` with the forwarded NAT-PMP port.
 
-3. **qBittorrent Update**: If ports don't match, uses the qBittorrent Web API to update the listening port:
-   - `GET /api/v2/app/preferences` - Get current settings
-   - `POST /api/v2/app/setPreferences` - Update port setting
+3. **qBittorrent Update**: When a mismatch is detected, the script updates qBittorrent using `/api/v2/app/setPreferences` with the new port.
 
-4. **Verification**: Confirms the port was actually changed in qBittorrent
+4. **Optional Restart & Verification**: If `QBITTORRENT_RESTART_COMMAND` is set, qBittorrent is restarted and polled until the WebUI reports the expected port.
 
-5. **Logging**: All activities are logged to `port-sync.log` with timestamps
+5. **Logging**: Every step logs to `port-sync.log` (and the systemd journal in daemon mode). Enabling `DEBUG=1` records truncated NAT-PMP and API payloads.
+
+> Need to align qBittorrent with the WireGuard listen port directly? Use `./port-sync.sh --force`, which still leverages the legacy WireGuard detection helpers.
 
 ## Troubleshooting
 
@@ -291,10 +292,11 @@ ERROR: qBittorrent Web UI is not accessible at http://localhost:8080
 - The installation script auto-detects the port, but you can manually specify it
 - Disable authentication for localhost
 
-**WireGuard port not detected:**
+**WireGuard port not detected (fallback mode):**
 ```bash
 ERROR: Could not determine WireGuard listening port
 ```
+- This only affects the legacy `--force` path; normal NAT-PMP syncing continues without it.
 - Check WireGuard is running: `sudo wg show`
 - Verify interface name matches script: `ip link show | grep wg`
 - Ensure you have permission to read WireGuard status
@@ -322,7 +324,7 @@ cat port-sync.log
 
 Test individual components:
 ```bash
-# Test WireGuard port detection
+# Test WireGuard port detection (legacy force mode)
 wg show wg0 listen-port
 
 # Test qBittorrent API access
