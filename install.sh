@@ -117,6 +117,17 @@ refresh_service_unit() {
         return 0
     fi
 
+    local template_path="$SCRIPT_DIR/qbittorrent-wireguard-sync.service"
+    if [[ ! -f "$template_path" ]]; then
+        echo -e "${YELLOW}⚠ Service template not found; skipping automatic refresh${NC}"
+        return 0
+    fi
+
+    if [[ ! "$template_path" -nt "$svc_path" ]]; then
+        echo -e "${GREEN}✓ Service unit already matches current template${NC}"
+        return 0
+    fi
+
     echo -e "${BLUE}Refreshing installed systemd service unit${NC}"
     echo "Detected installed unit: $svc_path"
 

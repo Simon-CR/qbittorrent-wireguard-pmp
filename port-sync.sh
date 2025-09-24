@@ -30,7 +30,20 @@ QBITTORRENT_HOST="${QBITTORRENT_HOST:-localhost}"
 QBITTORRENT_PORT="${QBITTORRENT_PORT:-${QB_PORT:-8080}}"
 QBITTORRENT_URL="http://${QBITTORRENT_HOST}:${QBITTORRENT_PORT}"
 QBITTORRENT_RESTART_COMMAND="${QBITTORRENT_RESTART_COMMAND:-${QBT_RESTART_COMMAND:-}}"
+QBITTORRENT_USERNAME="${QBITTORRENT_USERNAME:-${QB_USERNAME:-}}"
+QBITTORRENT_PASSWORD="${QBITTORRENT_PASSWORD:-${QB_PASSWORD:-}}"
+QBITTORRENT_COOKIE_JAR="$(mktemp -t qbittorrent_cookie_XXXXXX)"
+QBITTORRENT_LAST_PREFS=""
+QBITTORRENT_LAST_MAINDATA=""
 WG_INTERFACE="${WG_INTERFACE:-wg0}"  # Default WireGuard interface name
+
+cleanup() {
+    if [[ -n "$QBITTORRENT_COOKIE_JAR" && -f "$QBITTORRENT_COOKIE_JAR" ]]; then
+        rm -f "$QBITTORRENT_COOKIE_JAR"
+    fi
+}
+
+trap cleanup EXIT
 
 # Colored logging function
 log() {
@@ -57,8 +70,87 @@ log_warning() {
 debug() {
     if [[ "$DEBUG" == "1" ]]; then
         local message="[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: $1"
-        echo -e "${BLUE}${message}${NC}" | tee -a "$LOG_FILE"
+        echo -e "${BLUE}${message}${NC}" | tee -a "$LOG_FILE" >&2
     fi
+}
+
+qbittorrent_login() {
+    if [[ -n "$QBITTORRENT_USERNAME" && -n "$QBITTORRENT_PASSWORD" ]]; then
+        debug "Logging into qBittorrent WebUI"
+        local login_url="http://${QBITTORRENT_HOST}:${QBITTORRENT_PORT}/api/v2/auth/login"
+        local response
+        response=$(curl -sS -X POST "$login_url" \
+            -d "username=$QBITTORRENT_USERNAME" \
+            -d "password=$QBITTORRENT_PASSWORD" \
+            -c "$QBITTORRENT_COOKIE_JAR" \
+            --max-time 10)
+        if [[ "$response" != "Ok." ]]; then
+            log_error "qBittorrent login failed: $response"
+            return 1
+        fi
+        debug "qBittorrent login successful"
+    fi
+    return 0
+}
+
+qbittorrent_curl() {
+    local endpoint="$1"
+    shift
+
+    if [[ -n "$QBITTORRENT_USERNAME" && -n "$QBITTORRENT_PASSWORD" ]]; then
+        qbittorrent_login || return 1
+    fi
+
+    local url="http://${QBITTORRENT_HOST}:${QBITTORRENT_PORT}${endpoint}"
+    debug "Requesting $url"
+
+    curl -sS \
+        ${QBITTORRENT_COOKIE_JAR:+-b "$QBITTORRENT_COOKIE_JAR"} \
+        --max-time 10 \
+        "$@" \
+        "$url"
+}
+
+qbittorrent_curl_and_log() {
+    local endpoint="$1"
+    shift
+
+    local err_file
+    err_file=$(mktemp -t qbittorrent_curl_err_XXXXXX)
+
+    local response
+    response=$(qbittorrent_curl "$endpoint" "$@" 2>"$err_file")
+    local status=$?
+    local err_output
+    err_output=$(<"$err_file" 2>/dev/null || true)
+    rm -f "$err_file"
+
+    if (( status != 0 )); then
+        log_error "qBittorrent request to $endpoint failed: ${err_output:-curl exit $status}"
+        return 1
+    fi
+
+    debug "Response from $endpoint: $response"
+    echo "$response"
+    return 0
+}
+
+get_qbittorrent_use_random_port() {
+    local json="${1:-$QBITTORRENT_LAST_PREFS}"
+    if [[ -z "$json" ]]; then
+        echo "unknown"
+        return 1
+    fi
+    if echo "$json" | grep -q '"use_random_port"[[:space:]]*:[[:space:]]*true'; then
+        echo "true"
+        return 0
+    fi
+    if echo "$json" | grep -q '"use_random_port"[[:space:]]*:[[:space:]]*false'; then
+        echo "false"
+        return 0
+    fi
+    echo "unknown"
+    return 1
 }
 
 
@@ -180,10 +272,13 @@ get_wireguard_port() {
 # Get current qBittorrent port
 get_qbittorrent_port() {
     local response
-    
-    # Get preferences from qBittorrent Web API
-    response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
-    
+
+    if ! response=$(qbittorrent_curl_and_log "/api/v2/app/preferences" -f); then
+        response=""
+    fi
+
+    QBITTORRENT_LAST_PREFS="$response"
+
     if [[ -n "$response" ]]; then
         # Extract listen_port from JSON response - use multiple approaches
         local port
@@ -215,7 +310,11 @@ get_qbittorrent_port() {
 get_qbittorrent_runtime_port() {
     local response port
 
-    response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/sync/maindata" 2>/dev/null || echo "")
+    if ! response=$(qbittorrent_curl_and_log "/api/v2/sync/maindata" -f); then
+        response=""
+    fi
+
+    QBITTORRENT_LAST_MAINDATA="$response"
 
     if [[ -n "$response" ]]; then
         port=$(echo "$response" | grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
@@ -261,28 +360,35 @@ verify_qbittorrent_port() {
 # Set qBittorrent port
 set_qbittorrent_port() {
     local new_port="$1"
-    
-    # Set the new port via qBittorrent Web API
-    local response
-    response=$(curl -s -f -X POST \
-        "${QBITTORRENT_URL}/api/v2/app/setPreferences" \
-        -d "json={\"listen_port\":${new_port}}" \
-        2>/dev/null || echo "")
+    local payload
+    printf -v payload 'json={"listen_port":%s,"use_random_port":false}' "$new_port"
 
-    if [[ $? -eq 0 ]]; then
-        restart_qbittorrent_service || true
-        # Log full preferences response for diagnostics
-        prefs_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
-        log "Preferences after port update: $(echo "$prefs_response" | grep -o '"listen_port"[^,}]*')"
-        return 0
-    else
+    local random_flag
+    random_flag=$(get_qbittorrent_use_random_port)
+    if [[ "$random_flag" == "true" ]]; then
+        log_warning "Detected use_random_port=true; forcing it off while setting port"
+    fi
+
+    if ! qbittorrent_curl_and_log "/api/v2/app/setPreferences" -f -X POST -d "$payload" >/dev/null; then
+        log_error "Failed to update qBittorrent port to ${new_port}"
         return 1
     fi
+
+    restart_qbittorrent_service || true
+
+    local prefs_response
+    if prefs_response=$(qbittorrent_curl_and_log "/api/v2/app/preferences" -f); then
+        log "Preferences after port update: $(echo "$prefs_response" | grep -o '"listen_port"[^,}]*')"
+    else
+        log_warning "Unable to fetch preferences after port update"
+    fi
+
+    return 0
 }
 
 # Check if qBittorrent is running and accessible
 check_qbittorrent() {
-    if curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" >/dev/null 2>&1; then
+    if qbittorrent_curl "/api/v2/app/version" -f >/dev/null 2>&1; then
         return 0
     else
         return 1
@@ -332,7 +438,9 @@ main() {
             if verified_port=$(verify_qbittorrent_port "$sync_port"); then
                 log_success "Port update verified: qBittorrent is now using port $verified_port"
             else
-                log_warning "Port verification failed after retries. qBittorrent reports port: $verified_port"
+                local random_flag
+                random_flag=$(get_qbittorrent_use_random_port)
+                log_warning "Port verification failed after retries. qBittorrent reports port: $verified_port (use_random_port=$random_flag)"
                 return 1
             fi
         else
@@ -394,7 +502,9 @@ daemon_mode() {
                             log_success "[Loop] Port sync verified: Both services using port $verified_port"
                             last_port="$current_port"
                         else
-                            log_warning "[Loop] Port verification failed after retries. qBittorrent reports: $verified_port"
+                            local random_flag
+                            random_flag=$(get_qbittorrent_use_random_port)
+                            log_warning "[Loop] Port verification failed after retries. qBittorrent reports: $verified_port (use_random_port=$random_flag)"
                         fi
                     else
                         log_error "[Loop] Failed to update qBittorrent port to: $current_port"
@@ -434,10 +544,14 @@ case "${1:-}" in
         # Debug: Show raw API response
         echo ""
         echo -e "${YELLOW}Debug information:${NC}"
-        echo -e "${CYAN}qBittorrent API test:${NC} $(curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null && echo -e " ${GREEN}OK${NC}" || echo -e " ${RED}FAILED${NC}")"
-        
+        if qbittorrent_curl "/api/v2/app/version" -f >/dev/null 2>&1; then
+            echo -e "${CYAN}qBittorrent API test:${NC} ${GREEN}OK${NC}"
+        else
+            echo -e "${CYAN}qBittorrent API test:${NC} ${RED}FAILED${NC}"
+        fi
+
         # Show partial preferences response for debugging
-        debug_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
+        debug_response=$(qbittorrent_curl "/api/v2/app/preferences" -f 2>/dev/null || echo "")
         if [[ -n "$debug_response" ]]; then
             echo -e "${CYAN}API response contains listen_port:${NC} $(echo "$debug_response" | grep -q "listen_port" && echo -e "${GREEN}YES${NC}" || echo -e "${RED}NO${NC}")"
             echo -e "${CYAN}Raw listen_port line:${NC} $(echo "$debug_response" | grep -o '"listen_port"[^,}]*' || echo -e "${RED}NOT FOUND${NC}")"
@@ -490,14 +604,12 @@ case "${1:-}" in
         echo
         
         echo -e "${YELLOW}Testing qBittorrent API...${NC}"
-        if curl -s -f "${QBITTORRENT_URL}/api/v2/app/version" >/dev/null 2>&1; then
-            version=$(curl -s "${QBITTORRENT_URL}/api/v2/app/version" 2>/dev/null || echo "unknown")
+        if version=$(qbittorrent_curl "/api/v2/app/version" -f 2>/dev/null); then
             echo -e "  ${GREEN}✓${NC} qBittorrent API accessible"
             echo -e "  ${GREEN}✓${NC} Version: ${BLUE}$version${NC}"
-            
+
             echo "  Testing preferences API..."
-            prefs_response=$(curl -s -f "${QBITTORRENT_URL}/api/v2/app/preferences" 2>/dev/null || echo "")
-            if [[ -n "$prefs_response" ]]; then
+            if prefs_response=$(qbittorrent_curl "/api/v2/app/preferences" -f 2>/dev/null); then
                 echo -e "  ${GREEN}✓${NC} Preferences API working"
                 if echo "$prefs_response" | grep -q "listen_port"; then
                     echo -e "  ${GREEN}✓${NC} listen_port found in response"
