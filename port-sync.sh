@@ -30,6 +30,7 @@ QBITTORRENT_HOST="${QBITTORRENT_HOST:-localhost}"
 QBITTORRENT_PORT="${QBITTORRENT_PORT:-${QB_PORT:-8080}}"
 QBITTORRENT_URL="http://${QBITTORRENT_HOST}:${QBITTORRENT_PORT}"
 QBITTORRENT_RESTART_COMMAND="${QBITTORRENT_RESTART_COMMAND:-${QBT_RESTART_COMMAND:-}}"
+QBITTORRENT_RESTART_WAIT="${QBITTORRENT_RESTART_WAIT:-5}"  # Seconds to wait after restart
 QBITTORRENT_USERNAME="${QBITTORRENT_USERNAME:-${QB_USERNAME:-}}"
 QBITTORRENT_PASSWORD="${QBITTORRENT_PASSWORD:-${QB_PASSWORD:-}}"
 PORT_SYNC_TMPDIR_DEFAULT="${PORT_SYNC_TMPDIR:-${TMPDIR:-${SCRIPT_DIR}/tmp}}"
@@ -160,6 +161,27 @@ restart_qbittorrent_service() {
         log "Restarting qBittorrent using configured command"
         if bash -c "$QBITTORRENT_RESTART_COMMAND"; then
             log_success "qBittorrent restart command completed"
+            
+            # Wait for qBittorrent to fully restart and be ready
+            if [[ "$QBITTORRENT_RESTART_WAIT" -gt 0 ]]; then
+                log "Waiting ${QBITTORRENT_RESTART_WAIT}s for qBittorrent to be ready..."
+                sleep "$QBITTORRENT_RESTART_WAIT"
+                
+                # Check if qBittorrent is accessible after restart
+                local wait_attempts=10
+                local wait_delay=2
+                for ((i = 1; i <= wait_attempts; i++)); do
+                    if check_qbittorrent 2>/dev/null; then
+                        log_success "qBittorrent is ready after restart"
+                        return 0
+                    fi
+                    if (( i < wait_attempts )); then
+                        debug "qBittorrent not ready yet, waiting... (attempt $i/$wait_attempts)"
+                        sleep "$wait_delay"
+                    fi
+                done
+                log_warning "qBittorrent may not be fully ready yet after restart"
+            fi
             return 0
         else
             log_warning "Restart command failed; ensure qBittorrent reloads settings manually"
@@ -202,9 +224,9 @@ get_protonvpn_port() {
     local gw_args=()
     if [[ -n "$gw" ]]; then
         gw_args=("-g" "$gw")
-        log "Using NAT-PMP gateway: ${BLUE}$gw${NC}"
+        log "Using NAT-PMP gateway: ${BLUE}$gw${NC}" >&2
     else
-        log_warning "NATPMP_GATEWAY not set and could not derive from $WG_INTERFACE; attempting without -g (may fail)"
+        log_warning "NATPMP_GATEWAY not set and could not derive from $WG_INTERFACE; attempting without -g (may fail)" >&2
     fi
 
     # Request/refresh a 60-second mapping for UDP and TCP
@@ -231,12 +253,12 @@ get_protonvpn_port() {
     fi
 
     if [[ -n "$port" ]]; then
-        log "NAT-PMP mapped public port: ${GREEN}$port${NC}"
+        log "NAT-PMP mapped public port: ${GREEN}$port${NC}" >&2
         echo "$port"
         return 0
     fi
 
-    log_error "Failed to obtain NAT-PMP mapped public port. Set NATPMP_GATEWAY (e.g., 10.x.x.1)."
+    log_error "Failed to obtain NAT-PMP mapped public port. Set NATPMP_GATEWAY (e.g., 10.x.x.1)." >&2
     return 1
 }
 
@@ -332,23 +354,36 @@ get_qbittorrent_runtime_port() {
 
 verify_qbittorrent_port() {
     local expected="$1"
-    local attempts="${2:-5}"
-    local delay="${3:-2}"
+    local attempts="${2:-8}"  # Increased attempts
+    local delay="${3:-3}"     # Increased delay
     local attempt current runtime
 
+    # Wait a bit before first verification attempt
+    sleep 1
+
     for ((attempt = 1; attempt <= attempts; attempt++)); do
+        # Ensure qBittorrent is accessible before checking ports
+        if ! check_qbittorrent 2>/dev/null; then
+            debug "Verification attempt ${attempt}: qBittorrent not accessible yet"
+            if (( attempt < attempts )); then
+                sleep "$delay"
+                continue
+            fi
+        fi
+
         current=$(get_qbittorrent_port)
         runtime=$(get_qbittorrent_runtime_port 2>/dev/null || echo "")
         debug "Verification attempt ${attempt}: preferences=${current:-<empty>} runtime=${runtime:-<empty>}"
 
-        if [[ "$current" == "$expected" ]]; then
-            echo "$current"
-            return 0
-        fi
-
-        if [[ "$runtime" == "$expected" ]]; then
-            echo "$runtime"
-            return 0
+        # Check if either preferences or runtime port matches
+        if [[ "$current" == "$expected" ]] || [[ "$runtime" == "$expected" ]]; then
+            # Double-check with a second read to ensure consistency
+            sleep 1
+            current_check=$(get_qbittorrent_port)
+            if [[ "$current_check" == "$expected" ]]; then
+                echo "$expected"
+                return 0
+            fi
         fi
 
         if (( attempt < attempts )); then
@@ -472,7 +507,7 @@ daemon_mode() {
 
         # Only use ProtonVPN NAT-PMP port
         current_port=""
-        if current_port=$(get_protonvpn_port 2>/dev/null); then
+        if current_port=$(get_protonvpn_port); then
             log "[Loop] Detected ProtonVPN NAT-PMP port: ${BLUE}$current_port${NC}"
         else
             log_error "[Loop] Could not determine ProtonVPN NAT-PMP port. Make sure natpmpc is installed and port forwarding is active."
