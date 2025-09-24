@@ -12,6 +12,8 @@ ProtonVPN's port forwarding requires a persistent loop to keep the port open. If
 
 A bash script that continuously refreshes the ProtonVPN NAT-PMP forwarded port and keeps qBittorrent's listening port in sync. Perfect for VPN setups with dynamic port forwarding over WireGuard.
 
+> Although ProtonVPN is currently the primary provider exposing a NAT-PMP gateway on its WireGuard tunnels, the script works with any VPN service that offers the same NAT-PMP interface—just point `NATPMP_GATEWAY` at the provider’s gateway if it can’t be auto-detected.
+
 ## Features
 
 - 🔄 Automatically refreshes ProtonVPN NAT-PMP mappings and syncs qBittorrent
