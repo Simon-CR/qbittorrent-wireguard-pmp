@@ -290,7 +290,7 @@ get_protonvpn_port() {
         if [[ -z "$port" ]]; then
             port="$port_tcp"
         elif [[ "$port" != "$port_tcp" ]]; then
-            log_warning "UDP/TCP mapped ports differ (udp=$port tcp=$port_tcp); using UDP value"
+            log_warning "UDP/TCP mapped ports differ (udp=$port tcp=$port_tcp); using UDP value" >&2
         fi
     fi
 
