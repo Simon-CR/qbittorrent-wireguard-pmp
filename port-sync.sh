@@ -45,6 +45,8 @@ NATPMP_LIFETIME="${NATPMP_LIFETIME:-120}"
 NATPMP_RETRIES="${NATPMP_RETRIES:-3}"
 NATPMP_RETRY_DELAY="${NATPMP_RETRY_DELAY:-0.4}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-25}"
+PORT_CHANGE_CONFIRMATIONS="${PORT_CHANGE_CONFIRMATIONS:-3}"
+PORT_CHANGE_VERIFY_INTERVAL="${PORT_CHANGE_VERIFY_INTERVAL:-5}"
 DAEMON_MAX_LOOPS="${DAEMON_MAX_LOOPS:-0}"
 
 PORT_SYNC_TMPDIR_DEFAULT="${PORT_SYNC_TMPDIR:-${TMPDIR:-${SCRIPT_DIR}/tmp}}"
@@ -446,13 +448,18 @@ get_protonvpn_port() {
         log_warning "NATPMP_GATEWAY not set and could not derive from $WG_INTERFACE; attempting without -g (may fail)" >&2
     fi
 
-    # Request/refresh NAT-PMP mapping for UDP and TCP back-to-back
+    # Request/refresh NAT-PMP mapping for UDP and TCP back-to-back using the active port hint
+    local renew_hint="${NATPMP_PREFERRED_PORT:-${LAST_KNOWN_NATPMP_PORT:-1}}"
+    if [[ ! "$renew_hint" =~ ^[0-9]+$ ]] || (( renew_hint < 1 )); then
+        renew_hint=1
+    fi
+
     local port_udp="" port_tcp="" lt_udp="" lt_tcp=""
-    if _run_natpmpc_proto udp "$NATPMP_LIFETIME" 1; then
+    if _run_natpmpc_proto udp "$NATPMP_LIFETIME" "$renew_hint"; then
         port_udp="$_NATPMP_PORT"
         lt_udp="$_NATPMP_GRANTED_LIFETIME"
     fi
-    if _run_natpmpc_proto tcp "$NATPMP_LIFETIME" 1; then
+    if _run_natpmpc_proto tcp "$NATPMP_LIFETIME" "$renew_hint"; then
         port_tcp="$_NATPMP_PORT"
         lt_tcp="$_NATPMP_GRANTED_LIFETIME"
     fi
@@ -762,17 +769,7 @@ main() {
         return 1
     fi
 
-    # Obtain ProtonVPN / RFC-6886 NAT-PMP port
-    local sync_port
-    if ! sync_port=$(get_protonvpn_port); then
-        _load_natpmp_state
-        log_error "Could not determine ProtonVPN NAT-PMP port. Make sure natpmpc is installed and port forwarding is active."
-        return 1
-    fi
-    _load_natpmp_state
-    log "Detected ProtonVPN NAT-PMP port: ${BLUE}$sync_port${NC}"
-
-    # Get current qBittorrent port
+    # Get current qBittorrent port first so initial/restarted sync hints the active port when valid
     local current_qbt_port
     current_qbt_port=$(get_qbittorrent_port)
 
@@ -781,6 +778,16 @@ main() {
         return 1
     fi
 
+    # Obtain ProtonVPN / RFC-6886 NAT-PMP port (preferring active port hint when available)
+    local preferred_hint="${NATPMP_PREFERRED_PORT:-${LAST_KNOWN_NATPMP_PORT:-$current_qbt_port}}"
+    local sync_port
+    if ! sync_port=$(NATPMP_PREFERRED_PORT="$preferred_hint" get_protonvpn_port); then
+        _load_natpmp_state
+        log_error "Could not determine ProtonVPN NAT-PMP port. Make sure natpmpc is installed and port forwarding is active."
+        return 1
+    fi
+    _load_natpmp_state
+    log "Detected ProtonVPN NAT-PMP port: ${BLUE}$sync_port${NC}"
     log "Current qBittorrent port: ${BLUE}$current_qbt_port${NC}"
 
     # Compare ports and update if different
@@ -830,6 +837,16 @@ daemon_mode() {
     init_elapsed=$(( init_end - init_start ))
 
     local last_port="${LAST_KNOWN_NATPMP_PORT:-}"
+    local pending_port=""
+    local pending_port_streak=0
+    local confirmations_required="${PORT_CHANGE_CONFIRMATIONS:-3}"
+    if [[ ! "$confirmations_required" =~ ^[0-9]+$ ]] || (( confirmations_required < 1 )); then
+        confirmations_required=3
+    fi
+    local verify_interval="${PORT_CHANGE_VERIFY_INTERVAL:-5}"
+    if [[ ! "$verify_interval" =~ ^[0-9]+$ ]]; then
+        verify_interval=5
+    fi
     local config_check_interval=300  # Re-verify qBittorrent listen_port every 5 minutes even when NAT-PMP port is unchanged
     local last_config_check="$init_end"
     local loop_count=0
@@ -853,11 +870,12 @@ daemon_mode() {
         rotate_log_if_needed
         loop_count=$(( loop_count + 1 ))
 
-        local loop_start loop_end elapsed target_interval sleep_for
+        local loop_start loop_end elapsed target_interval sleep_for fast_verify_pending=0
         loop_start=$(date +%s)
 
+        local active_hint="${last_port:-${LAST_KNOWN_NATPMP_PORT:-1}}"
         local current_port=""
-        if current_port=$(get_protonvpn_port); then
+        if current_port=$(NATPMP_PREFERRED_PORT="$active_hint" get_protonvpn_port); then
             _load_natpmp_state
             log "[Loop] Detected ProtonVPN NAT-PMP port: ${BLUE}$current_port${NC}"
         else
@@ -869,13 +887,44 @@ daemon_mode() {
         if [[ -n "$current_port" ]]; then
             local need_qbt_check=0
             if [[ "$current_port" != "$last_port" ]]; then
-                need_qbt_check=1
-                if [[ -n "$last_port" ]]; then
-                    log_warning "[Loop] Port changed from $last_port to $current_port"
+                if [[ -n "$last_port" ]] && (( confirmations_required > 1 )); then
+                    if [[ "$current_port" == "$pending_port" ]]; then
+                        pending_port_streak=$(( pending_port_streak + 1 ))
+                    else
+                        pending_port="$current_port"
+                        pending_port_streak=1
+                    fi
+
+                    if (( pending_port_streak < confirmations_required )); then
+                        # Keep LAST_KNOWN_NATPMP_PORT pinned to confirmed last_port during debounce so renewals still hint last_port
+                        LAST_KNOWN_NATPMP_PORT="$last_port"
+                        _save_natpmp_state
+                        fast_verify_pending=1
+                        log_warning "[Loop] Candidate port change from $last_port to $current_port (confirmation ${pending_port_streak}/${confirmations_required}); re-verifying in ${verify_interval}s before updating qBittorrent"
+                    else
+                        log_warning "[Loop] Port change from $last_port to $current_port confirmed (${pending_port_streak}/${confirmations_required} consecutive checks)"
+                        need_qbt_check=1
+                        pending_port=""
+                        pending_port_streak=0
+                    fi
+                else
+                    if [[ -n "$last_port" ]]; then
+                        log_warning "[Loop] Port changed from $last_port to $current_port"
+                    fi
+                    need_qbt_check=1
+                    pending_port=""
+                    pending_port_streak=0
                 fi
-            elif (( loop_start - last_config_check >= config_check_interval )); then
-                need_qbt_check=1
-                last_config_check="$loop_start"
+            else
+                if (( pending_port_streak > 0 )); then
+                    log "[Loop] Candidate port change to ${pending_port} cleared after ${pending_port_streak}/${confirmations_required} check(s); port remains stable at $current_port"
+                    pending_port=""
+                    pending_port_streak=0
+                fi
+                if (( loop_start - last_config_check >= config_check_interval )); then
+                    need_qbt_check=1
+                    last_config_check="$loop_start"
+                fi
             fi
 
             if (( need_qbt_check == 1 )); then
@@ -891,6 +940,8 @@ daemon_mode() {
                         if [[ "${LAST_VERIFIED_QBT_PORT:-}" == "$current_port" ]] || verified_port=$(verify_qbittorrent_port "$current_port" 3 1 0.2); then
                             log_success "[Loop] Port sync verified: Both services using port ${verified_port:-$current_port}"
                             last_port="$current_port"
+                            LAST_KNOWN_NATPMP_PORT="$current_port"
+                            _save_natpmp_state
                         else
                             local reported_port="${verified_port:-$(get_qbittorrent_port 2>/dev/null || echo "<unknown>")}"
                             log_warning "[Loop] Port verification failed after retries. qBittorrent reports: $reported_port"
@@ -908,6 +959,8 @@ daemon_mode() {
                         debug "[Loop] Periodic qBittorrent check confirmed listen_port=$current_port"
                     fi
                     last_port="$current_port"
+                    LAST_KNOWN_NATPMP_PORT="$current_port"
+                    _save_natpmp_state
                 else
                     log_warning "[Loop] qBittorrent Web UI is not accessible - will retry on next cycle"
                     last_port=""
@@ -917,6 +970,8 @@ daemon_mode() {
             if [[ -n "$last_port" ]]; then
                 log_warning "[Loop] VPN/WireGuard port appears to be down"
                 last_port=""
+                pending_port=""
+                pending_port_streak=0
             fi
         fi
 
@@ -927,16 +982,17 @@ daemon_mode() {
             elapsed=0
         fi
 
-        if (( elapsed >= 20 )); then
+        if (( fast_verify_pending == 1 )); then
+            sleep_for="$verify_interval"
+        elif (( elapsed >= 20 )); then
             log_warning "[Loop] Cycle took ${elapsed}s (>=20s); refreshing NAT-PMP lease immediately before sleeping"
             local post_op_port=""
-            if post_op_port=$(get_protonvpn_port); then
+            if post_op_port=$(NATPMP_PREFERRED_PORT="${last_port:-1}" get_protonvpn_port); then
                 _load_natpmp_state
                 target_interval=$(compute_target_interval)
                 if [[ -n "$post_op_port" && "$post_op_port" != "$current_port" ]]; then
                     log_warning "[Loop] NAT-PMP port rotated during slow operation (${current_port:-<none>} -> $post_op_port); scheduling fast resync"
-                    last_port=""
-                    sleep_for=5
+                    sleep_for="$verify_interval"
                 else
                     sleep_for="$target_interval"
                 fi

@@ -206,6 +206,22 @@ case "$scenario" in
         tcp_port="$(cat "${STATE_DIR}/natpmp_tcp_only_port" 2>/dev/null || echo "51111")"
         echo "Mapped public port ${tcp_port} protocol TCP to local port 0 liftime ${granted_lt}"
         ;;
+    sequence_ports)
+        # Reads 1 port per protocol pair (UDP+TCP) from ${STATE_DIR}/port_sequence (comma-separated)
+        seq_str="$(cat "${STATE_DIR}/port_sequence" 2>/dev/null || echo "42833")"
+        pair_idx_file="${STATE_DIR}/seq_proto_calls"
+        calls="$(cat "$pair_idx_file" 2>/dev/null || echo "0")"
+        pair_idx=$(( calls / 2 ))
+        calls=$(( calls + 1 ))
+        echo "$calls" >"$pair_idx_file"
+        IFS=',' read -r -a seq_arr <<<"$seq_str"
+        max_idx=$(( ${#seq_arr[@]} - 1 ))
+        if (( pair_idx > max_idx )); then
+            pair_idx="$max_idx"
+        fi
+        port="${seq_arr[$pair_idx]}"
+        echo "Mapped public port ${port} protocol ${proto_upper} to local port 0 liftime ${granted_lt}"
+        ;;
     *)
         echo "Unknown mock natpmpc scenario: $scenario" >&2
         exit 1
@@ -510,6 +526,58 @@ if [[ -f "${ROT_LOG}.1" ]]; then
 else
     fail "Oversized LOG_FILE was not rotated to LOG_FILE.1"
 fi
+
+# ---------------------------------------------------------------------------
+# Test 10: Active-Port Renewal Hint & Ghost-Lease Port-Flap Debounce
+# ---------------------------------------------------------------------------
+echo -e "\n${CYAN}--- Test 10: Active-Port Renewal Hint & Port-Flap Debounce ---${NC}"
+reset_state
+echo "42833" >"${STATE_DIR}/qbt_port"
+echo "sequence_ports" >"${STATE_DIR}/natpmp_scenario"
+# Sequence across initial sync + 6 daemon loops:
+#   init:   42833 (matches qbt_port 42833)
+#   loop 1: 31938 (ghost-lease blip 1/3 -> ignored!)
+#   loop 2: 42833 (blip clears -> resets streak, 0 setPreferences!)
+#   loop 3: 49200 (genuine rotation 1/3 -> pending)
+#   loop 4: 49200 (genuine rotation 2/3 -> pending)
+#   loop 5: 49200 (genuine rotation 3/3 -> CONFIRMED & hot-applied to qBittorrent!)
+#   loop 6: 49200 (steady state on new port 49200 -> natpmpc now hints -a 49200!)
+echo "42833,31938,42833,49200,49200,49200,49200" >"${STATE_DIR}/port_sequence"
+LOG_PATH="${TEST_ROOT}/test10.log"
+
+# Mock sleep as no-op so 6 daemon loops execute instantaneously
+cat >"${BIN_DIR}/sleep" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "${BIN_DIR}/sleep"
+
+out10="$(
+    LOG_FILE="$LOG_PATH" \
+    PORT_SYNC_TMPDIR="$WORK_TMP" \
+    NATPMP_GATEWAY="10.2.0.1" \
+    NATPMP_LIFETIME="120" \
+    PORT_CHANGE_CONFIRMATIONS="3" \
+    PORT_CHANGE_VERIFY_INTERVAL="0" \
+    DAEMON_MAX_LOOPS="6" \
+    bash "$PORT_SYNC" --daemon 2>&1
+)"
+rm -f "${BIN_DIR}/sleep"
+
+assert_contains "$out10" "Candidate port change from 42833 to 31938 (confirmation 1/3)" "Logged 1/3 candidate warning on transient 31938 ghost blip"
+assert_contains "$out10" "Candidate port change to 31938 cleared after 1/3 check(s); port remains stable at 42833" "Cleared transient 31938 blip when 42833 returned on next check"
+assert_contains "$out10" "Port change from 42833 to 49200 confirmed (3/3 consecutive checks)" "Confirmed genuine rotation to 49200 after 3/3 consecutive checks"
+assert_eq "49200" "$(cat "${STATE_DIR}/qbt_port")" "qBittorrent updated cleanly to confirmed port 49200"
+assert_eq "1" "$(cat "${STATE_DIR}/set_prefs_count")" "Exactly 1 setPreferences call (transient 31938 ghost blip completely suppressed)"
+
+natpmpc_calls_10="$(cat "${STATE_DIR}/natpmpc_calls.log")"
+if printf '%s\n' "$natpmpc_calls_10" | grep -Fq -- "-a 31938"; then
+    fail "natpmpc must NEVER hint unconfirmed ghost port 31938 during debounce" "$natpmpc_calls_10"
+else
+    pass "natpmpc never hinted unconfirmed ghost port 31938 during debounce"
+fi
+assert_contains "$natpmpc_calls_10" "-g 10.2.0.1 -a 42833 0 udp 120" "natpmpc explicitly renewed active port 42833 via pub_port_hint"
+assert_contains "$natpmpc_calls_10" "-g 10.2.0.1 -a 49200 0 udp 120" "natpmpc switched renewal hint to 49200 after 3/3 confirmation"
 
 echo -e "\n============================================"
 echo -e "Passed: ${GREEN}${PASS_COUNT}${NC} | Failed: ${RED}${FAIL_COUNT}${NC}"
