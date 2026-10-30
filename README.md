@@ -1,12 +1,12 @@
 ## Why Continuous Updates?
 
-ProtonVPN's port forwarding requires a persistent loop to keep the port open. If the loop process stops, the forwarded port closes after 60 seconds. The included systemd service keeps natpmpc alive by refreshing the mapping roughly every 45 seconds.
+ProtonVPN's port forwarding requires a persistent loop to keep the port open. If the loop process stops, the forwarded port closes after 60 seconds. The included systemd service keeps `natpmpc` alive by refreshing the mapping every ~24–25 seconds (<45% of ProtonVPN's 60-second granted lease so at least two independent renewal attempts fit inside every lease window) with wall-clock elapsed-time compensation.
 
 > "Port forwarding is now activated. Note that closing your terminal window will terminate the loop process. You will need to re-run this loop script each time you want to start a new port forwarding session or the port will only stay open for 60 seconds." — ProtonVPN Docs
 
 **Summary:**
 - Keeping the NAT-PMP lease alive prevents ProtonVPN from reclaiming your forwarded port.
-- The daemon loop is lightweight and only updates qBittorrent when necessary.
+- Port changes are hot-applied via qBittorrent's WebUI API (`POST /api/v2/app/setPreferences`) with **zero service restarts and zero torrent downtime**.
 
 # qBittorrent WireGuard Port Sync
 
@@ -16,13 +16,14 @@ A bash script that continuously refreshes the ProtonVPN NAT-PMP forwarded port a
 
 ## Features
 
-- 🔄 Automatically refreshes ProtonVPN NAT-PMP mappings and syncs qBittorrent
+- 🔄 Automatically refreshes ProtonVPN / RFC-6886 NAT-PMP mappings (`NATPMP_LIFETIME=120`, adaptive `CHECK_INTERVAL=25`) with wall-clock elapsed compensation
+- ⚡ Zero-downtime hot port rebinding via qBittorrent WebUI API (`QBITTORRENT_RESTART_COMMAND` used strictly as an emergency fallback if hot-apply verification fails)
+- 🩹 Automatic UDP/TCP port-split self-healing (hinted TCP resync followed by lease release and symmetric re-request) plus transient UDP packet-loss retries
 - 📡 Updates qBittorrent via Web API with optional credentials
-- 📝 Comprehensive logging for debugging
-- 🔁 Optional auto-restart of qBittorrent to apply new ports
+- 📝 Comprehensive logging with automatic 5 MiB `port-sync.log` rotation
 - 🔧 Includes WireGuard port detection as a fallback for manual force operations
 - ⚙️ Ready-to-run systemd service that maintains ProtonVPN NAT-PMP leases
-- 🛡️ Error handling and validation
+- 🛡️ Automated offline unit test suite (`tests/test_port_sync.sh`)
 - 🔍 Status checking and manual override options
 
 ## Requirements
@@ -58,7 +59,7 @@ The installation script will:
 - Verify your WireGuard interface is active
 - Test qBittorrent Web UI connectivity
 - Configure the script for your setup
-- Offer to install/refresh the bundled systemd service (continuous ~45-second loop)
+- Offer to install/refresh the bundled systemd service (continuous ~24–25-second adaptive renewal loop)
 - Provide a manual option if you prefer to run the script yourself
 
 ### Option 2: Manual Setup
@@ -78,8 +79,8 @@ chmod +x port-sync.sh
 ## Operation Modes
 
 ### Systemd Service (Recommended)
-- Refreshes the ProtonVPN NAT-PMP lease roughly every 45 seconds
-- Automatically keeps qBittorrent aligned with the active forwarded port
+- Refreshes the ProtonVPN NAT-PMP lease every ~24–25 seconds (`CHECK_INTERVAL=25`, adapting automatically to `<=40%` of the gateway's granted lifetime)
+- Automatically hot-updates qBittorrent via WebUI API without restarting the service
 - Provides journaled logs and simple management commands via `service-manager.sh`
 
 ```bash
@@ -100,7 +101,7 @@ Run the script directly if you prefer to supervise it yourself:
 ./port-sync.sh           # Normal sync
 ./port-sync.sh --check   # Check status only
 ./port-sync.sh --force   # Force qBittorrent to match the WireGuard listen port (fallback)
-./port-sync.sh --daemon  # Run as daemon (~45s intervals)
+./port-sync.sh --daemon  # Run as daemon (~24-25s adaptive renewal intervals)
 ```
 
 ### 2. Configure qBittorrent Web UI (if using manual setup)
@@ -167,7 +168,7 @@ sudo ./service-manager.sh install
 # Force qBittorrent to match the WireGuard listen port (fallback)
 ./port-sync.sh --force
 
-# Run as daemon (continuous monitoring ~45 seconds)
+# Run as daemon (continuous monitoring ~24-25 seconds)
 ./port-sync.sh --daemon
 
 # Show detailed debugging information
@@ -232,17 +233,23 @@ Most behavior is controlled through environment variables. Defaults are shown be
 | `QBITTORRENT_PORT` / `QB_PORT` | `8080` | qBittorrent Web UI port |
 | `QBITTORRENT_USERNAME` / `QB_USERNAME` | _(empty)_ | Optional Web UI username |
 | `QBITTORRENT_PASSWORD` / `QB_PASSWORD` | _(empty)_ | Optional Web UI password |
-| `QBITTORRENT_RESTART_COMMAND` / `QBT_RESTART_COMMAND` | _(empty)_ | Command to restart qBittorrent after updates |
-| `QBITTORRENT_RESTART_WAIT` | `5` | Seconds to wait after restart before verification |
 | `NATPMP_GATEWAY` | _(auto-detect)_ | Override ProtonVPN NAT-PMP gateway IP |
+| `NATPMP_LIFETIME` | `120` | Requested NAT-PMP lease lifetime in seconds passed to `natpmpc` |
+| `NATPMP_RETRIES` | `3` | Maximum `natpmpc` attempts per protocol on transient UDP packet loss |
+| `CHECK_INTERVAL` | `25` | Base renewal target interval in seconds (adapts to `min(CHECK_INTERVAL, max(15, granted_lifetime * 2 / 5))`) |
+| `QBITTORRENT_RESTART_COMMAND` / `QBT_RESTART_COMMAND` | _(empty)_ | Emergency fallback command to restart qBittorrent **only** if WebUI API hot-apply verification fails |
+| `QBITTORRENT_RESTART_WAIT` | `5` | Seconds to wait after fallback restart before verification |
+| `QBITTORRENT_FORCE_RESTART` | `0` | Set to `1` to force a service restart on every port change instead of hot API apply |
+| `QBITTORRENT_RESTART_ON_FAILURE` | `1` | Invoke `QBITTORRENT_RESTART_COMMAND` automatically when hot-apply verification fails |
+| `LOG_MAX_BYTES` | `5242880` | Rotate `port-sync.log` to `port-sync.log.1` when size exceeds limit (5 MiB) |
 | `DEBUG` | `0` | Enable extra logging when set to `1` |
 | `DEBUG_PAYLOAD_PREVIEW` | `512` | Max characters printed for debug payloads |
-| `PORT_SYNC_TMPDIR` | `./tmp` | Directory for temporary curl files |
+| `PORT_SYNC_TMPDIR` | `./tmp` | Directory for temporary curl/state files |
 
 ### Examples
 
 ```bash
-# Run once with explicit restart command and debug logging
+# Run once with fallback restart command and debug logging
 QBITTORRENT_RESTART_COMMAND="systemctl restart qbittorrent-nox" \
 DEBUG=1 ./port-sync.sh --force
 
@@ -257,15 +264,15 @@ When using the systemd unit, export these variables in `/etc/default/qbittorrent
 
 ## How It Works
 
-1. **NAT-PMP Mapping**: Every loop, the script calls `natpmpc` to refresh the ProtonVPN NAT-PMP lease and capture the currently forwarded port (deriving the gateway from the WireGuard interface when needed).
+1. **Resilient NAT-PMP Lease Renewal & Self-Healing**: Every cycle (`CHECK_INTERVAL=25`, or `24s` for ProtonVPN's 60-second granted lifetime), the script refreshes UDP and TCP mappings via `natpmpc` (`NATPMP_LIFETIME=120`) with per-protocol retries (`NATPMP_RETRIES=3`). If UDP and TCP mapped ports ever diverge, it automatically attempts a hinted TCP resync and, if still split, releases both mappings (`lifetime 0`) and immediately re-requests a fresh symmetric port pair.
 
-2. **Port Comparison**: Retrieves qBittorrent preferences via the Web API and compares the configured `listen_port` with the forwarded NAT-PMP port.
+2. **Wall-Clock Elapsed Compensation**: Daemon cycles measure wall-clock execution time (`elapsed`) and sleep `target_interval - elapsed` (clamped to `>=5s`). If any slow API or recovery operation takes `>=20s`, the daemon immediately refreshes the NAT-PMP lease before sleeping so a 60-second lease never expires between cycles.
 
-3. **qBittorrent Update**: When a mismatch is detected, the script updates qBittorrent using `/api/v2/app/setPreferences` with the new port.
+3. **Zero-Downtime Hot Port Rebind**: When a port mismatch is detected, `set_qbittorrent_port()` updates qBittorrent dynamically via `POST /api/v2/app/setPreferences` (`{"listen_port": <port>}`) and verifies the new port in `<0.5s` with **zero service restarts**.
 
-4. **Optional Restart & Verification**: If `QBITTORRENT_RESTART_COMMAND` is set, qBittorrent is restarted and polled until the WebUI reports the expected port.
+4. **Emergency Fallback Restart**: `QBITTORRENT_RESTART_COMMAND` is invoked **only** if hot-reload verification fails after retries (or if `QBITTORRENT_FORCE_RESTART=1` is explicitly set).
 
-5. **Logging**: Every step logs to `port-sync.log` (and the systemd journal in daemon mode). Enabling `DEBUG=1` records truncated NAT-PMP and API payloads.
+5. **Logging & Rotation**: Every step logs to `port-sync.log` (automatically rotated to `port-sync.log.1` at 5 MiB) and the systemd journal in daemon mode.
 
 > Need to align qBittorrent with the WireGuard listen port directly? Use `./port-sync.sh --force`, which still leverages the legacy WireGuard detection helpers.
 
@@ -337,16 +344,21 @@ curl http://localhost:8080/api/v2/app/preferences | grep listen_port
 
 # Test the script with debug mode
 bash port-sync.sh --debug
+# Run the offline automated unit test suite
+bash tests/test_port_sync.sh
 ```
 
 ## File Structure
 
 ```
 qbittorrent-wireguard-pmp/
-├── port-sync.sh           # Main script
-├── port-sync.log          # Activity log (auto-created)
-├── install.sh             # Installation helper
-└── README.md              # This file
+├── port-sync.sh                       # Main NAT-PMP sync & daemon script
+├── qbittorrent-wireguard-sync.service # Systemd unit template
+├── service-manager.sh                 # Systemd unit installer/helper
+├── install.sh                         # Interactive setup & updater
+├── tests/test_port_sync.sh            # Offline automated mock test suite
+├── .gitattributes                     # Enforces LF line endings on scripts/units
+└── README.md                          # Documentation
 ```
 
 ## Security Notes
